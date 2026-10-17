@@ -1,4 +1,4 @@
-# SignBridge
+# Sign2MeetU
 
 Sign one word into your phone's camera, see it as text, hear it spoken.
 Recognition runs on **Perceptron Mk1.5**, called directly through Perceptron's API (https://docs.perceptron.inc), with a fixed vocabulary of 20 ASL signs.
