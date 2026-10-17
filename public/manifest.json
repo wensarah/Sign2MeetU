@@ -1,0 +1,11 @@
+{
+  "name": "SignBridge",
+  "short_name": "SignBridge",
+  "description": "Sign to it. Hear it spoken.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b0f14",
+  "theme_color": "#0b0f14",
+  "icons": []
+}

@@ -1,0 +1,28 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #0b0f14;
+  --panel: #141a22;
+  --ink: #eef2f6;
+  --muted: #8a96a6;
+  --accent: #f5b83d;
+  --rec: #ef4444;
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+
+body {
+  font-family: ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+@keyframes fill {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
