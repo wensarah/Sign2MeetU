@@ -8,7 +8,7 @@
 // merge the same file twice.
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 
 const OUT = "public/dataset.json";
 const files = process.argv.slice(2);
@@ -17,7 +17,9 @@ if (files.length === 0) {
   process.exit(1);
 }
 
-const inputs = existsSync(OUT) ? [OUT, ...files] : files;
+// An empty placeholder file counts as "no dataset yet".
+const hasExisting = existsSync(OUT) && statSync(OUT).size > 0;
+const inputs = hasExisting ? [OUT, ...files] : files;
 let version = null;
 const seen = new Set();
 const examples = [];

@@ -3,10 +3,6 @@
 // "Training" = keeping a list of labeled examples (the dataset).
 // "Predicting" = finding the K examples most similar to a new fingerprint and
 //                letting them vote.
-//
-// YOUR TASKS: implement dtwDistance() and predict(). Everything else is done.
-// The /train page shows "kNN not implemented yet" until you do.
- 
 import { FEATURE_VERSION, type Fingerprint, type Frame } from "./landmarks";
  
 export type Example = {
@@ -42,7 +38,7 @@ export function frameDistance(a: Frame, b: Frame): number {
 }
  
 // ---------------------------------------------------------------------------
-// TODO 1: Dynamic Time Warping distance between two fingerprints
+// DONE: Dynamic Time Warping distance between two fingerprints
 // ---------------------------------------------------------------------------
 /**
  * How different are two recordings, allowing one to be faster or slower?
@@ -70,12 +66,32 @@ export function frameDistance(a: Frame, b: Frame): number {
  * Math.abs(i - j) <= 4. This is called a "Sakoe-Chiba band".
  */
 export function dtwDistance(a: Fingerprint, b: Fingerprint): number {
-  // TODO: implement. Delete the line below when you do.
-  throw new Error("kNN not implemented yet: write dtwDistance() in lib/knn.ts");
+  const n = a.length;
+  const m = b.length;
+  if (n === 0 || m === 0) return Infinity;
+
+  // cost[i][j] = cheapest way to line up the first i frames of a with the first j frames of b
+  const cost: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(Infinity));
+  cost[0][0] = 0;
+
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      const d = frameDistance(a[i - 1], b[j - 1]);
+      cost[i][j] =
+        d +
+        Math.min(
+          cost[i - 1][j], // a moves ahead, b waits
+          cost[i][j - 1], // b moves ahead, a waits
+          cost[i - 1][j - 1], // both move ahead
+        );
+    }
+  }
+
+  return cost[n][m] / (n + m);
 }
  
 // ---------------------------------------------------------------------------
-// TODO 2: predict the sign for a new fingerprint
+// DONE: predict the sign for a new fingerprint
 // ---------------------------------------------------------------------------
 /**
  * Steps:
@@ -98,8 +114,30 @@ export function dtwDistance(a: Fingerprint, b: Fingerprint): number {
  * If `examples` is empty, return { label: "UNKNOWN", confidence: 0, top: [] }.
  */
 export function predict(seq: Fingerprint, examples: Example[], k: number = K): Prediction {
-  // TODO: implement. Delete the line below when you do.
-  throw new Error("kNN not implemented yet: write predict() in lib/knn.ts");
+  if (examples.length === 0) return { label: "UNKNOWN", confidence: 0, top: [] };
+
+  // 1-3. Distance to every example, nearest first, keep the k closest
+  const neighbors = examples
+    .map((ex) => ({ label: ex.label, distance: dtwDistance(seq, ex.seq) }))
+    .sort((x, y) => x.distance - y.distance)
+    .slice(0, k);
+
+  // 4. Weighted vote: closer neighbors count more
+  const votes: Record<string, number> = {};
+  for (const nb of neighbors) {
+    votes[nb.label] = (votes[nb.label] ?? 0) + 1 / (nb.distance + 1e-6);
+  }
+
+  // 5-6. Rank labels by vote and turn votes into shares of the total
+  const ranked = Object.entries(votes).sort((x, y) => y[1] - x[1]);
+  const total = ranked.reduce((sum, [, v]) => sum + v, 0);
+  const [winner, winnerVotes] = ranked[0];
+
+  return {
+    label: winner,
+    confidence: total > 0 ? winnerVotes / total : 0,
+    top: ranked.slice(0, 3).map(([label, v]) => ({ label, score: total > 0 ? v / total : 0 })),
+  };
 }
  
 // ---------------------------------------------------------------------------
