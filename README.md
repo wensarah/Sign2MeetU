@@ -48,21 +48,3 @@ Edit `lib/vocab.ts`. Each entry needs a `key` (what the model returns), `text` (
 1. Record clips with the app's camera conditions (front camera, ~arm's length, 2–3 seconds). The easiest way is your phone's camera app, then AirDrop/upload them.
 2. Organize them as `test-clips/<SIGN_KEY>/<anything>.mp4`. Aim for 5–10 clips per sign across all three of you. A `test-clips/UNKNOWN/` folder of "not signing" clips is useful too.
 3. With `npm run dev` running: `npm run eval`
-
-You'll get accuracy per sign, the most common mix-ups, average latency, and a `results.csv`. Drop or re-describe signs below ~50%, re-run, repeat. Put the final number on a slide.
-
-## Known gotchas
-
-- **iPhone records mp4, Android/Chrome records webm.** `pickMimeType()` in `page.tsx` handles this; the server passes the real MIME type to the model.
-- **Speech on iOS** only works after a tap, so the first Record press unlocks it.
-- **Clip size:** recording at 600 kbps keeps clips well under Vercel's ~4.5 MB request limit. If you raise `CLIP_MS` or the bitrate, watch this.
-- **Perceptron's context is ~37K tokens.** Long or high-res clips can exceed it. If you see context errors, lower the resolution in `getUserMedia` or shorten the clip.
-- **Mirroring:** the preview is mirrored like a selfie, but the recorded video is not. The prompt tells the model that either hand may lead.
-- **Debug:** tap ⓘ in the app to see which provider answered and how long it took.
-
-## Demo-day checklist
-
-- [ ] Record a backup screen-recording of the app working
-- [ ] Test in the actual venue lighting
-- [ ] Plain background behind the signer, both hands in frame
-- [ ] Test the Perceptron key on the venue Wi-Fi, and have the backup video ready in case the API is unreachable
