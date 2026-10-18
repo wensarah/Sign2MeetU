@@ -8,3 +8,5 @@ next-env.d.ts
 test-clips
 results.csv
 .vercel
+public/mediapipe
+dataset-*.json

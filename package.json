@@ -1,15 +1,19 @@
 {
-  "name": "signbridge",
+  "name": "sign2meetu",
   "version": "0.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "eval": "node scripts/eval.mjs"
+    "eval": "node scripts/eval.mjs",
+    "postinstall": "node scripts/copy-mediapipe.mjs",
+    "merge": "node scripts/merge-datasets.mjs"
   },
   "dependencies": {
     "next": "^16.4.2",
+    "@mediapipe/tasks-vision": "^1.1.1",
+    "next": "^15.5.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
