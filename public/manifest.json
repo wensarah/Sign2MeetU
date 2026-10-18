@@ -1,11 +1,11 @@
 {
-  "name": "SignBridge",
-  "short_name": "SignBridge",
+  "name": "Sign2MeetU",
+  "short_name": "Sign2MeetU",
   "description": "Sign to it. Hear it spoken.",
   "start_url": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#0b0f14",
-  "theme_color": "#0b0f14",
+  "background_color": "#c6a8ed",
+  "theme_color": "#c6a8ed",
   "icons": []
 }

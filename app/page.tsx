@@ -11,8 +11,6 @@ type Result = {
   sign: string;
   text: string;
   confidence: number;
-  provider?: string;
-  ms?: number;
 };
 
 // iOS Safari records mp4; Chrome/Android record webm. Pick what this browser supports.
@@ -38,7 +36,7 @@ export default function Home() {
   const [result, setResult] = useState<Result | null>(null);
   const [transcript, setTranscript] = useState<string[]>([]);
   const [speak, setSpeak] = useState(true);
-  const [showDebug, setShowDebug] = useState(false);
+  const [showInfo, setShowInfo] = useState(false);
 
   // --- Camera ------------------------------------------------------------
   useEffect(() => {
@@ -179,10 +177,15 @@ export default function Home() {
 
   return (
     <main className="mx-auto flex min-h-[100dvh] max-w-md flex-col px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))]">
-      <header className="flex items-center justify-between py-2">
-        <h1 className="text-lg font-bold tracking-tight">
-          Sign<span className="text-[var(--accent)]">Bridge</span>
-        </h1>
+      <header className="flex items-start justify-between gap-2 py-2">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-bold tracking-tight">
+            Sign2<span className="text-[var(--accent)]">MeetU</span>
+          </h1>
+          <p className="text-sm font-medium leading-snug text-[var(--ink)]">
+            Sign and translate!
+          </p>
+        </div>
         <div className="flex gap-2">
           <button
             onClick={() => setSpeak((s) => !s)}
@@ -192,110 +195,159 @@ export default function Home() {
             {speak ? "🔊 Voice on" : "🔇 Voice off"}
           </button>
           <button
-            onClick={() => setShowDebug((d) => !d)}
+            onClick={() => setShowInfo((visible) => !visible)}
             className="min-h-11 min-w-11 rounded-full bg-[var(--panel)] px-3 py-1.5 text-sm text-[var(--muted)]"
-            aria-label="Toggle diagnostics"
-            aria-expanded={showDebug}
-            aria-controls="result"
+            aria-label={showInfo ? "Hide help information" : "Show help information"}
+            aria-expanded={showInfo}
+            aria-controls="help-info"
+            title="How to use Sign2MeetU"
           >
             ⓘ
           </button>
         </div>
       </header>
 
-      {/* Camera */}
-      <section
-        className="relative mt-2 aspect-[3/4] w-full overflow-hidden rounded-3xl bg-[var(--panel)]"
-        aria-label="Camera preview"
+      <div
+        className={`grid transition-[grid-template-rows,opacity] duration-300 ease-in-out ${
+          showInfo ? "mb-2 grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"
+        }`}
+        inert={!showInfo}
+        aria-hidden={!showInfo}
       >
-        <video
-          ref={videoRef}
-          playsInline
-          muted
-          autoPlay
-          className="h-full w-full -scale-x-100 object-cover"
+        <div className="overflow-hidden">
+          <aside
+            id="help-info"
+            className="rounded-2xl border-2 border-[var(--accent)] bg-[var(--panel)] p-4 text-sm leading-relaxed text-[var(--ink)]"
+            aria-label="How to use Sign2MeetU"
+          >
+            <p>
+              Tap the round button to record one sign. Keep your hands in the camera frame. Recognized words appear in
+              the result box and build a sentence below.
+            </p>
+            <p className="mt-2">
+              The confidence rate estimates how sure the app is about a translation. Turn Voice on to hear recognized
+              words spoken aloud.
+            </p>
+          </aside>
+        </div>
+      </div>
+
+      {/* Camera */}
+      <div className="relative mt-2 aspect-[3/4] w-full">
+        <svg className="absolute h-0 w-0" aria-hidden="true" focusable="false">
+          <defs>
+            <clipPath id="camera-bubble-clip" clipPathUnits="objectBoundingBox">
+              <path d="M .08 0 H .92 Q 1 0 1 .08 V .86 Q 1 .94 .92 .94 H .88 L 1 1 L .76 .94 H .08 Q 0 .94 0 .86 V .08 Q 0 0 .08 0 Z" />
+            </clipPath>
+          </defs>
+        </svg>
+        <section
+          className="camera-bubble-frame absolute inset-0 bg-[var(--panel)]"
+          aria-label="Camera preview"
+        >
+          <video
+            ref={videoRef}
+            playsInline
+            muted
+            autoPlay
+            className="h-full w-full -scale-x-100 object-cover"
+            aria-hidden="true"
+          />
+
+          {phase === "recording" && (
+            <>
+              <div className="absolute inset-0 rounded-3xl ring-4 ring-inset ring-[var(--rec)]" />
+              <div className="absolute left-3 top-3 flex items-center gap-2 rounded-full bg-black/60 px-3 py-1 text-sm text-white">
+                <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-[var(--rec)]" /> Sign now
+              </div>
+              <div className="absolute inset-x-0 bottom-0 h-1.5 bg-black/40">
+                <div
+                  className="h-full origin-left bg-[var(--rec)]"
+                  style={{ animation: `fill ${CLIP_MS}ms linear forwards` }}
+                />
+              </div>
+            </>
+          )}
+
+          {phase === "thinking" && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/50 text-base text-white">
+              Reading your sign…
+            </div>
+          )}
+
+          {phase === "starting" && (
+            <div className="absolute inset-0 flex items-center justify-center bg-[var(--panel)]/95 text-[var(--muted)]">
+              Starting camera…
+            </div>
+          )}
+
+          {phase === "error" && (
+            <div className="absolute inset-0 flex items-center justify-center bg-[var(--panel)]/95 p-6 text-center text-[var(--muted)]">
+              {error}
+            </div>
+          )}
+        </section>
+        <svg
+          className="pointer-events-none absolute inset-0 z-20 h-full w-full"
+          viewBox="0 0 100 100"
+          preserveAspectRatio="none"
           aria-hidden="true"
-        />
-
-        {phase === "recording" && (
-          <>
-            <div className="absolute inset-0 rounded-3xl ring-4 ring-inset ring-[var(--rec)]" />
-            <div className="absolute left-3 top-3 flex items-center gap-2 rounded-full bg-black/60 px-3 py-1 text-sm">
-              <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-[var(--rec)]" /> Sign now
-            </div>
-            <div className="absolute inset-x-0 bottom-0 h-1.5 bg-black/40">
-              <div
-                className="h-full origin-left bg-[var(--rec)]"
-                style={{ animation: `fill ${CLIP_MS}ms linear forwards` }}
-              />
-            </div>
-          </>
-        )}
-
-        {phase === "thinking" && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/50 text-base">
-            Reading your sign…
-          </div>
-        )}
-
-        {phase === "starting" && (
-          <div className="absolute inset-0 flex items-center justify-center text-[var(--muted)]">
-            Starting camera…
-          </div>
-        )}
-
-        {phase === "error" && (
-          <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-[var(--muted)]">
-            {error}
-          </div>
-        )}
-      </section>
+          focusable="false"
+        >
+          <path
+            d="M 8 0 H 92 Q 100 0 100 8 V 86 Q 100 94 92 94 H 88 L 100 100 L 76 94 H 8 Q 0 94 0 86 V 8 Q 0 0 8 0 Z"
+            fill="none"
+            stroke="var(--accent)"
+            strokeWidth="2"
+            vectorEffect="non-scaling-stroke"
+          />
+        </svg>
+      </div>
 
       {/* Result */}
       <section
         id="result"
-        className="mt-4 min-h-[5.5rem] rounded-2xl bg-[var(--panel)] p-4"
+        className="mt-4 mb-2 min-h-[5.5rem] rounded-2xl bg-[var(--ink)] p-4 text-white"
         aria-label="Sign result"
         aria-live="polite"
         aria-atomic="true"
       >
         {!result && phase !== "thinking" && (
-          <p className="text-[var(--muted)]">Tap the button, then sign one word. Keep both hands in frame.</p>
+          <p className="text-white">Tap the button, then sign one word. Keep both hands in frame.</p>
         )}
-        {result && result.sign === "ERROR" && <p className="text-[var(--rec)]">{result.text}</p>}
+        {result && result.sign === "ERROR" && <p className="text-white">{result.text}</p>}
         {result && result.sign === "UNKNOWN" && (
-          <p className="text-[var(--muted)]">Didn't catch that. Try again a little slower, with good lighting.</p>
+          <p className="text-white">Didn't catch that. Try again a little slower, with good lighting.</p>
         )}
         {result && result.sign !== "UNKNOWN" && result.sign !== "ERROR" && (
-          <div className="flex items-end justify-between gap-3">
-            <p className="text-4xl font-bold leading-tight">{result.text}</p>
-            <p
-              className={`shrink-0 text-sm ${
-                result.confidence >= MIN_CONFIDENCE ? "text-[var(--accent)]" : "text-[var(--muted)]"
-              }`}
-            >
-              {Math.round(result.confidence * 100)}%{result.confidence < MIN_CONFIDENCE && " · unsure"}
-            </p>
+          <div>
+            <div className="flex items-end justify-between gap-3">
+              <p className="text-4xl font-bold leading-tight">{result.text}</p>
+              <div className="shrink-0 text-right">
+                <p className="text-sm text-white">
+                  {Math.round(result.confidence * 100)}%{result.confidence < MIN_CONFIDENCE && " · unsure"}
+                </p>
+                <p className="text-xs text-white">Confidence rate</p>
+              </div>
+            </div>
           </div>
-        )}
-        {showDebug && result?.provider && (
-          <p className="mt-2 font-mono text-xs text-[var(--muted)]">
-            {result.provider} · {result.sign} · {result.ms} ms
-          </p>
         )}
       </section>
 
       {/* Transcript */}
-      <section className="mt-3 flex min-h-0 flex-1 items-start gap-2" aria-label="Transcript">
-        <p className="flex-1 overflow-y-auto text-lg leading-snug text-[var(--muted)]">
+      <section
+        className="mt-3 mb-5 flex min-h-0 flex-1 items-start gap-2 rounded-2xl bg-[#905fc1] p-4 text-white"
+        aria-label="Transcript"
+      >
+        <p className="flex-1 overflow-y-auto text-lg leading-snug text-white">
           {sentence || "Your sentence builds up here."}
         </p>
         {transcript.length > 0 && (
           <div className="flex shrink-0 gap-2">
-            <button onClick={() => say(sentence)} className="min-h-11 rounded-full bg-[var(--panel)] px-3 py-1.5 text-sm">
+            <button onClick={() => say(sentence)} className="min-h-11 rounded-full bg-[var(--ink)] px-3 py-1.5 text-sm text-white">
               Replay
             </button>
-            <button onClick={() => setTranscript([])} className="min-h-11 rounded-full bg-[var(--panel)] px-3 py-1.5 text-sm">
+            <button onClick={() => setTranscript([])} className="min-h-11 rounded-full bg-[var(--ink)] px-3 py-1.5 text-sm text-white">
               Clear
             </button>
           </div>

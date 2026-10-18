@@ -286,8 +286,9 @@ export default function TrainPage() {
   return (
     <main className="mx-auto max-w-md px-4 pb-10 pt-4">
       <header className="mb-3 flex items-baseline justify-between">
-        <h1 className="text-lg font-bold">
-          Sign2<span className="text-[var(--accent)]">MeetU</span> <span className="text-[var(--muted)]">· Train</span>
+        <h1 className="text-2xl font-bold tracking-tight">
+          Sign2<span className="text-[var(--accent)]">MeetU</span>{" "}
+          <span className="text-base text-[var(--muted)]">· Train</span>
         </h1>
         <a href="/" className="text-sm text-[var(--muted)] underline">
           Back to app
@@ -299,22 +300,22 @@ export default function TrainPage() {
         <video ref={videoRef} playsInline muted autoPlay className="h-full w-full -scale-x-100 object-cover" />
         <canvas ref={canvasRef} className="pointer-events-none absolute inset-0 h-full w-full -scale-x-100 object-cover" />
  
-        <div className="absolute left-2 top-2 rounded-full bg-black/60 px-2.5 py-1 text-xs">
+        <div className="absolute left-2 top-2 rounded-full bg-black/60 px-2.5 py-1 text-xs text-white">
           {phase === "loading" ? "Loading hand tracker…" : handsVisible ? "✋ Hands detected" : "No hands"}
         </div>
         {phase === "countdown" && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/40 text-7xl font-bold">{count}</div>
+          <div className="absolute inset-0 flex items-center justify-center bg-black/40 text-7xl font-bold text-white">{count}</div>
         )}
         {phase === "recording" && (
           <>
             <div className="absolute inset-0 rounded-2xl ring-4 ring-inset ring-[var(--rec)]" />
-            <div className="absolute right-2 top-2 rounded-full bg-[var(--rec)] px-2.5 py-1 text-xs font-semibold">
+            <div className="absolute right-2 top-2 rounded-full bg-[var(--rec)] px-2.5 py-1 text-xs font-semibold text-[var(--panel)]">
               Sign now
             </div>
           </>
         )}
         {phase === "error" && (
-          <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm text-[var(--muted)]">
+          <div className="absolute inset-0 flex items-center justify-center bg-[var(--panel)]/95 p-6 text-center text-sm text-[var(--muted)]">
             {error}
           </div>
         )}
@@ -380,7 +381,7 @@ export default function TrainPage() {
             <button
               onClick={handleRecordExample}
               disabled={busy}
-              className="flex-1 rounded-full bg-[var(--rec)] py-3 font-semibold disabled:opacity-40"
+              className="flex-1 rounded-full bg-[var(--rec)] py-3 font-semibold text-[var(--panel)] disabled:opacity-40"
             >
               Record “{VOCAB.find((s) => s.key === selected)?.text}”
             </button>
@@ -395,7 +396,7 @@ export default function TrainPage() {
             <button
               onClick={handleTry}
               disabled={busy}
-              className="flex-1 rounded-full bg-[var(--rec)] py-3 font-semibold disabled:opacity-40"
+              className="flex-1 rounded-full bg-[var(--rec)] py-3 font-semibold text-[var(--panel)] disabled:opacity-40"
             >
               Try a sign
             </button>
