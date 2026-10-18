@@ -156,7 +156,7 @@ export function drawHands(ctx: CanvasRenderingContext2D, result: HandLandmarkerR
   ctx.clearRect(0, 0, width, height);
   if (!result?.landmarks) return;
   for (const points of result.landmarks) {
-    ctx.fillStyle = "#c6a8ed";
+    ctx.fillStyle = "#8ace00"; // brat green
     for (const p of points) {
       ctx.beginPath();
       ctx.arc(p.x * width, p.y * height, 4, 0, Math.PI * 2);

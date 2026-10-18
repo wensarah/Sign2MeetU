@@ -1,17 +1,49 @@
 "use client";
 
+// Main app. Pipeline:
+//   front camera ──► MediaPipe hands ──► SignSegmenter
+//   hands enter the frame ──► recording starts automatically
+//                         ──► one front-camera still ──► /api/scene (runs while you sign)
+//   each sign ──► kNN classifier (top 3) + video clip ──► Perceptron decides,
+//                 and names the body part / object for pointing signs (HERE, THAT, PAIN)
+//   no hands for 2s (or "Done", or 15s limit) ──► signs + scene + recent sentences
+//                 ──► /api/sentence ──► show + speak
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { HandLandmarker } from "@mediapipe/tasks-vision";
+import { loadHandLandmarker, frameFeatures, makeFingerprint, drawHands, type Frame } from "@/lib/landmarks";
+import { predict, mergeDatasets, emptyDataset, type Dataset, type Prediction } from "@/lib/knn";
+import {
+  SignSegmenter,
+  SENTENCE_GAP_MS,
+  RECORDING_MAX_MS,
+  RECORDING_MIN_MS,
+  type SegmenterEvent,
+} from "@/lib/segmenter";
+import { UNKNOWN, VOCAB, VOCAB_KEYS, textFor } from "@/lib/vocab";
 
-const CLIP_MS = 2500;
-const MIN_CONFIDENCE = 0.5; // below this we show the guess but don't speak it
+const MIN_CONFIDENCE = 0.5; // Perceptron confidence we accept on its own
+const KNN_FALLBACK = 0.6; // classifier confidence needed when Perceptron can't decide
+const MIN_EXAMPLES_PER_SIGN = 3; // before that, the classifier only gives Perceptron hints
+const MIN_SIGNERS = 2; // ...and the same until at least this many people have recorded
+const DATASET_STORAGE_KEY = "sign2meetu-dataset"; // where /train saves examples on this device
+const SCENE_WIDTH = 640;
+const IDLE_CLIP_MS = 3000; // max lead-in before a sign in the clip sent to Perceptron
+const AUTO_SCENE_WAIT_MS = 1500; // how long a finished sentence waits for the background scene
+const HISTORY_SENTENCES = 2; // recent sentences sent along for context
 
-type Phase = "starting" | "ready" | "recording" | "thinking" | "error";
-
-type Result = {
-  sign: string;
-  text: string;
-  confidence: number;
+type Phase = "starting" | "ready" | "listening" | "scanning" | "error";
+type Facing = "user" | "environment";
+type Scene = { place: string; objects: string[] };
+type PerceptronResult = { sign: string; text: string; confidence: number; target?: string };
+type Gloss = {
+  id: number;
+  status: "pending" | "done" | "skipped";
+  key?: string;
+  text?: string;
+  target?: string; // body part or object pointed at (HERE, THAT, PAIN)
+  via?: "perceptron" | "classifier";
 };
+type Sentence = { id: number; text: string; glosses: string[]; scenePlace: string };
 
 // iOS Safari records mp4; Chrome/Android record webm. Pick what this browser supports.
 function pickMimeType(): string {
@@ -26,21 +58,139 @@ function pickMimeType(): string {
   return candidates.find((t) => MediaRecorder.isTypeSupported(t)) ?? "";
 }
 
+/** Perceptron decides; the on-device classifier fills in when Perceptron can't. */
+/**
+ * The classifier may answer on its own only once it has seen every sign a few
+ * times, from more than one signer (one person's data doesn't generalize).
+ */
+function classifierCoverage(dataset: Dataset) {
+  const counts: Record<string, number> = {};
+  for (const e of dataset.examples) counts[e.label] = (counts[e.label] ?? 0) + 1;
+  const covered = VOCAB.filter((s) => (counts[s.key] ?? 0) >= MIN_EXAMPLES_PER_SIGN).length;
+  const signers = new Set(dataset.examples.map((e) => e.signer)).size;
+  return { covered, total: VOCAB.length, signers, ready: covered === VOCAB.length && signers >= MIN_SIGNERS };
+}
+
+function decide(
+  p: PerceptronResult | null,
+  knn: Prediction | null,
+  classifierReady: boolean
+): { key: string; via: Gloss["via"]; target: string } | null {
+  const perceptronSign = p && p.sign !== UNKNOWN && textFor(p.sign) ? p.sign : null;
+  // Only Perceptron can see where the signer pointed; keep its target if the sign agrees.
+  const targetFor = (key: string) => (p && p.sign === key ? p.target ?? "" : "");
+  if (perceptronSign && (p!.confidence >= MIN_CONFIDENCE || perceptronSign === knn?.label)) {
+    return { key: perceptronSign, via: "perceptron", target: targetFor(perceptronSign) };
+  }
+  if (classifierReady && knn && knn.label !== UNKNOWN && knn.confidence >= KNN_FALLBACK) {
+    return { key: knn.label, via: "classifier", target: targetFor(knn.label) };
+  }
+  if (perceptronSign) return { key: perceptronSign, via: "perceptron", target: targetFor(perceptronSign) };
+  return null;
+}
+
+function mergeScenes(manual: Scene | null, auto: Scene | null): Scene | null {
+  if (!manual) return auto;
+  if (!auto) return manual;
+  // The deliberate scan is more specific, so it comes first.
+  const objects = [...new Set([...manual.objects, ...auto.objects])].slice(0, 8);
+  return { place: manual.place || auto.place, objects };
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const landmarkerRef = useRef<HandLandmarker | null>(null);
+  const segmenterRef = useRef(new SignSegmenter());
+  const datasetRef = useRef<Dataset>(emptyDataset());
+  const clipRef = useRef<{ recorder: MediaRecorder; done: Promise<Blob | null>; startedAt: number } | null>(null);
+  const clipTickRef = useRef<(now: number, signing: boolean) => void>(() => {});
+  const pendingRef = useRef<{ id: number; job: Promise<Gloss> }[]>([]); // signs in the current sentence
+  const phaseRef = useRef<Phase>("starting");
+  const sceneRef = useRef<Scene | null>(null); // from the back-camera scan
+  const autoSceneRef = useRef<Promise<Scene | null> | null>(null); // background of the current recording
+  const historyRef = useRef<string[]>([]); // recent English sentences, oldest first
+  const idRef = useRef(0);
+  const handlersRef = useRef<(ev: SegmenterEvent) => void>(() => {});
   const speechUnlocked = useRef(false);
 
-  const [phase, setPhase] = useState<Phase>("starting");
+  const [phase, setPhaseState] = useState<Phase>("starting");
   const [error, setError] = useState("");
-  const [result, setResult] = useState<Result | null>(null);
-  const [transcript, setTranscript] = useState<string[]>([]);
+  const [facing, setFacing] = useState<Facing>("user");
+  const [handsVisible, setHandsVisible] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [elapsed, setElapsed] = useState(0); // whole seconds into the current recording
+  const [progress, setProgress] = useState(0); // 0..1 toward "sentence done"
+  const [glosses, setGlosses] = useState<Gloss[]>([]);
+  const [sentences, setSentences] = useState<Sentence[]>([]);
+  const [translating, setTranslating] = useState(0); // number of sentences being translated
+  const [notice, setNotice] = useState("");
+  const [scene, setSceneState] = useState<Scene | null>(null);
+  const [sceneLoading, setSceneLoading] = useState(false);
+  const [sceneError, setSceneError] = useState("");
+  const [classifier, setClassifier] = useState({ examples: 0, covered: 0, total: VOCAB.length, signers: 0, ready: false });
   const [speak, setSpeak] = useState(true);
   const [showInfo, setShowInfo] = useState(false);
 
+  // The camera loop runs outside React, so it reads these through refs.
+  const setPhase = (p: Phase) => {
+    phaseRef.current = p;
+    setPhaseState(p);
+  };
+  const setScene = (s: Scene | null) => {
+    sceneRef.current = s;
+    setSceneState(s);
+  };
+
   // --- Camera ------------------------------------------------------------
+  const openCamera = useCallback(async (facingMode: Facing) => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode,
+        width: { ideal: 640 },
+        height: { ideal: 480 },
+        frameRate: { ideal: 24, max: 30 },
+      },
+    });
+    streamRef.current = stream;
+    setFacing(facingMode);
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play().catch(() => {});
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
+    let raf = 0;
+    let lastTime = -1;
+
+    async function loadDataset() {
+      let team = emptyDataset();
+      try {
+        const res = await fetch("/dataset.json", { cache: "no-store" });
+        if (res.ok) team = (await res.json()) as Dataset;
+      } catch {
+        /* no team dataset yet: Perceptron works alone */
+      }
+      let local = emptyDataset();
+      try {
+        const saved = localStorage.getItem(DATASET_STORAGE_KEY);
+        if (saved) local = JSON.parse(saved) as Dataset;
+      } catch {
+        /* private browsing etc. */
+      }
+      // Ignore examples of signs that are no longer in the vocabulary.
+      const merged = mergeDatasets(team, local);
+      datasetRef.current = { ...merged, examples: merged.examples.filter((e) => VOCAB_KEYS.includes(e.label)) };
+      setClassifier({ examples: datasetRef.current.examples.length, ...classifierCoverage(datasetRef.current) });
+    }
 
     async function start() {
       if (!window.isSecureContext) {
@@ -54,25 +204,7 @@ export default function Home() {
         return;
       }
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            facingMode: "user",
-            width: { ideal: 640 },
-            height: { ideal: 480 },
-            frameRate: { ideal: 24, max: 30 },
-          },
-        });
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play().catch(() => {});
-        }
-        setPhase("ready");
+        await openCamera("user");
       } catch (e) {
         const name = e instanceof DOMException ? e.name : "";
         setError(
@@ -81,15 +213,60 @@ export default function Home() {
             : "Couldn't open the camera. Is another app using it?"
         );
         setPhase("error");
+        return;
       }
+      if (cancelled) return;
+
+      loadDataset();
+      try {
+        landmarkerRef.current = await loadHandLandmarker();
+      } catch {
+        setError("Couldn't load the hand tracker. Check your connection and reload.");
+        setPhase("error");
+        return;
+      }
+      if (cancelled) return;
+      setPhase("listening"); // auto start: recording begins when hands enter the frame
+
+      const loop = () => {
+        const v = videoRef.current;
+        const lm = landmarkerRef.current;
+        if (v && lm && v.readyState >= 2 && v.currentTime !== lastTime && phaseRef.current !== "scanning") {
+          lastTime = v.currentTime;
+          const now = performance.now();
+          const result = lm.detectForVideo(v, now);
+          setHandsVisible(result.landmarks.length > 0);
+
+          const c = canvasRef.current;
+          if (c) {
+            if (c.width !== v.videoWidth) {
+              c.width = v.videoWidth;
+              c.height = v.videoHeight;
+            }
+            drawHands(c.getContext("2d")!, result);
+          }
+
+          if (phaseRef.current === "listening") {
+            const seg = segmenterRef.current;
+            for (const ev of seg.push(frameFeatures(result), now)) handlersRef.current(ev);
+            clipTickRef.current(now, seg.signing);
+            setRecording(seg.recording);
+            setElapsed(Math.floor(seg.recordingMs(now) / 1000));
+            setProgress(Math.round(seg.sentenceProgress(now) * 20) / 20);
+          }
+        }
+        raf = requestAnimationFrame(loop);
+      };
+      loop();
     }
 
     start();
     return () => {
       cancelled = true;
+      cancelAnimationFrame(raf);
       streamRef.current?.getTracks().forEach((t) => t.stop());
     };
-  }, []);
+  }, [openCamera]);
 
   // --- Speech ------------------------------------------------------------
   // iOS only allows speech after a user gesture, so we "unlock" it on the first tap.
@@ -112,71 +289,338 @@ export default function Home() {
     [speak]
   );
 
-  // --- Record + translate ------------------------------------------------
-  const recordClip = (): Promise<Blob> =>
-    new Promise((resolve, reject) => {
-      const stream = streamRef.current;
-      if (!stream) return reject(new Error("No camera stream"));
-
-      const mimeType = pickMimeType();
+  // --- One clip per sign, for Perceptron -----------------------------------
+  // The recorder runs the whole time we're listening, so each sign's clip starts
+  // BEFORE the hands come up (nothing gets cut off). While idle it restarts
+  // every IDLE_CLIP_MS so that lead-in stays short.
+  const startClip = () => {
+    const stream = streamRef.current;
+    if (!stream || clipRef.current) return;
+    const mimeType = pickMimeType();
+    try {
       const recorder = new MediaRecorder(stream, {
         ...(mimeType ? { mimeType } : {}),
-        videoBitsPerSecond: 600_000, // keeps a 2.5s clip well under 1 MB
+        videoBitsPerSecond: 600_000, // even a 7s clip stays well under 1 MB
       });
       const chunks: Blob[] = [];
-      recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-      recorder.onerror = () => reject(new Error("Recording failed"));
-      recorder.onstop = () => resolve(new Blob(chunks, { type: recorder.mimeType || mimeType || "video/webm" }));
+      const done = new Promise<Blob | null>((resolve) => {
+        recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+        recorder.onerror = () => resolve(null);
+        recorder.onstop = () => resolve(new Blob(chunks, { type: recorder.mimeType || mimeType || "video/webm" }));
+      });
       recorder.start();
-      setTimeout(() => recorder.state !== "inactive" && recorder.stop(), CLIP_MS);
-    });
+      clipRef.current = { recorder, done, startedAt: performance.now() };
+    } catch {
+      /* recording unsupported: the classifier still works */
+    }
+  };
 
-  const handleRecord = async () => {
-    if (phase !== "ready") return;
+  /** Called every camera frame while listening: keep a fresh clip running. */
+  clipTickRef.current = (now: number, signing: boolean) => {
+    const clip = clipRef.current;
+    if (!clip) return startClip();
+    if (!signing && now - clip.startedAt > IDLE_CLIP_MS) {
+      stopClip(); // nothing was signed in it: throw it away
+      startClip();
+    }
+  };
+
+  const stopClip = (): Promise<Blob | null> => {
+    const clip = clipRef.current;
+    clipRef.current = null;
+    if (!clip) return Promise.resolve(null);
+    if (clip.recorder.state !== "inactive") clip.recorder.stop();
+    return clip.done;
+  };
+
+  // --- Recognize one sign --------------------------------------------------
+  const recognize = async (frames: (Frame | null)[], clip: Promise<Blob | null>) => {
+    const seq = makeFingerprint(frames);
+    const examples = datasetRef.current.examples;
+    const knn = seq && examples.length ? predict(seq, examples) : null;
+
+    let perceptron: PerceptronResult | null = null;
+    const blob = await clip;
+    if (blob && blob.size > 0) {
+      try {
+        const form = new FormData();
+        form.append("video", blob, `sign.${blob.type.includes("mp4") ? "mp4" : "webm"}`);
+        if (knn) form.append("candidates", JSON.stringify(knn.top));
+        const res = await fetch("/api/translate", { method: "POST", body: form });
+        if (res.ok) perceptron = (await res.json()) as PerceptronResult;
+      } catch {
+        /* network trouble: fall back to the classifier */
+      }
+    }
+    return decide(perceptron, knn, classifierCoverage(datasetRef.current).ready);
+  };
+
+  // --- Background scene, captured from the front camera while signing --------
+  const captureAutoScene = async (): Promise<Scene | null> => {
+    const video = videoRef.current;
+    if (!video) return null;
+    try {
+      const photo = await grabFrame(video);
+      if (!photo) return null;
+      const form = new FormData();
+      form.append("image", photo, "background.jpg");
+      const res = await fetch("/api/scene", { method: "POST", body: form });
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!data.place || (data.place === "unknown" && !data.objects?.length)) return null;
+      return { place: data.place, objects: data.objects ?? [] };
+    } catch {
+      return null; // translation still works without it
+    }
+  };
+
+  // --- Throw away a recording that was too short -----------------------------
+  const discardSentence = () => {
+    autoSceneRef.current = null;
+    const jobs = pendingRef.current;
+    pendingRef.current = [];
+    const ids = new Set(jobs.map((j) => j.id));
+    setGlosses((g) => g.filter((x) => !ids.has(x.id)));
+    if (jobs.length) {
+      setNotice(`That was shorter than ${RECORDING_MIN_MS / 1000} second, so it was skipped. Sign a little longer.`);
+    }
+  };
+
+  // --- Turn the finished sentence into English -------------------------------
+  const finishSentence = async () => {
+    const jobs = pendingRef.current;
+    const autoScene = autoSceneRef.current;
+    pendingRef.current = [];
+    autoSceneRef.current = null;
+    if (!jobs.length) return;
+
+    setTranslating((n) => n + 1);
+    try {
+      const results = await Promise.all(jobs.map((j) => j.job));
+      const ids = new Set(jobs.map((j) => j.id));
+      setGlosses((g) => g.filter((x) => !ids.has(x.id)));
+
+      const done = results.filter((r) => r.status === "done");
+      if (!done.length) {
+        setNotice("Didn't catch any signs. Try again a little slower, with good lighting.");
+        return;
+      }
+
+      // The background scan started when the hands came up; it's usually done by now.
+      const background = autoScene
+        ? await Promise.race([autoScene, sleep(AUTO_SCENE_WAIT_MS).then(() => null)])
+        : null;
+      const sceneNow = mergeScenes(sceneRef.current, background);
+
+      const shown = done.map((r) => (r.target ? `${r.text} (${r.target})` : r.text!));
+      let text = done.map((r) => r.text).join(" ");
+      let scenePlace = "";
+      try {
+        const res = await fetch("/api/sentence", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            // Send what each sign MEANS (its display text), not its internal key:
+            // the STUDY sign is shown as "tutoring center", so it's sent as TUTORING_CENTER.
+            glosses: done.map((r) => ({ gloss: (r.text || r.key!).toUpperCase(), target: r.target ?? "" })),
+            history: historyRef.current.slice(-HISTORY_SENTENCES),
+            ...(sceneNow ? { scene: sceneNow } : {}),
+          }),
+        });
+        const data = await res.json();
+        if (res.ok && data.sentence) {
+          text = data.sentence;
+          if (data.usedScene && sceneNow) scenePlace = sceneNow.place;
+        }
+      } catch {
+        /* keep the plain word list */
+      }
+
+      historyRef.current = [...historyRef.current, text].slice(-5);
+      setNotice("");
+      setSentences((s) => [{ id: ++idRef.current, text, glosses: shown, scenePlace }, ...s]);
+      say(text);
+    } finally {
+      setTranslating((n) => n - 1);
+    }
+  };
+
+  // --- Segmenter events (called from the camera loop) -----------------------
+  handlersRef.current = (ev: SegmenterEvent) => {
+    if (ev.type === "recordingStart") {
+      setNotice("");
+      autoSceneRef.current = captureAutoScene();
+    } else if (ev.type === "signStart") {
+      startClip(); // normally already running (see clipTickRef)
+    } else if (ev.type === "signCancel") {
+      stopClip();
+      startClip();
+    } else if (ev.type === "signEnd") {
+      const clip = stopClip();
+      startClip(); // the next sign's clip starts right away
+      const id = ++idRef.current;
+      setGlosses((g) => [...g, { id, status: "pending" }]);
+      const job = recognize(ev.frames, clip)
+        .catch(() => null)
+        .then((pick) => {
+          const gloss: Gloss = pick
+            ? {
+                id,
+                status: "done",
+                key: pick.key,
+                text: textFor(pick.key) || pick.key,
+                target: pick.target || undefined,
+                via: pick.via,
+              }
+            : { id, status: "skipped" };
+          setGlosses((list) => list.map((x) => (x.id === id ? gloss : x)));
+          return gloss;
+        });
+      pendingRef.current.push({ id, job });
+    } else if (ev.type === "sentenceEnd") {
+      setProgress(0);
+      finishSentence();
+    } else if (ev.type === "sentenceCancel") {
+      setProgress(0);
+      discardSentence();
+    }
+  };
+
+  // --- Controls --------------------------------------------------------------
+  const toggleListening = () => {
     unlockSpeech();
-    setResult(null);
-    setPhase("recording");
+    if (phase === "listening") {
+      for (const ev of segmenterRef.current.flush()) handlersRef.current(ev); // keep what was signed
+      segmenterRef.current.reset();
+      stopClip();
+      setRecording(false);
+      setProgress(0);
+      setPhase("ready"); // paused
+    } else if (phase === "ready") {
+      segmenterRef.current.reset();
+      setNotice("");
+      setPhase("listening");
+    }
+  };
+
+  const finishNow = () => {
+    unlockSpeech();
+    for (const ev of segmenterRef.current.flush()) handlersRef.current(ev);
+  };
+
+  const undo = () => {
+    const last = pendingRef.current.pop();
+    if (!last) return;
+    segmenterRef.current.forgetLastSign();
+    setGlosses((g) => g.filter((x) => x.id !== last.id));
+  };
+
+  const clearAll = () => {
+    pendingRef.current = [];
+    autoSceneRef.current = null;
+    historyRef.current = [];
+    segmenterRef.current.reset();
+    setGlosses([]);
+    setSentences([]);
+    setNotice("");
+    setProgress(0);
+  };
+
+  // --- Scene scan (back camera, one photo) -------------------------------------
+  // Phones can't run both cameras at once, so scanning waits until no recording is in progress.
+  const canScan = (phase === "ready" || phase === "listening") && !recording && !sceneLoading;
+
+  const grabFrame = (video: HTMLVideoElement): Promise<Blob | null> => {
+    const scale = Math.min(1, SCENE_WIDTH / (video.videoWidth || SCENE_WIDTH));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round((video.videoWidth || SCENE_WIDTH) * scale);
+    canvas.height = Math.round((video.videoHeight || 480) * scale);
+    canvas.getContext("2d")!.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.7));
+  };
+
+  const scanScene = async () => {
+    if (!canScan) return;
+    const resumeTo = phase; // go back to listening or paused afterwards
+    unlockSpeech();
+    segmenterRef.current.reset();
+    stopClip(); // the recorder is tied to the front camera stream we're about to close
+    setSceneError("");
+    setPhase("scanning");
+
+    let photo: Blob | null = null;
+    try {
+      await openCamera("environment");
+      await sleep(800); // let the camera focus and adjust exposure
+      if (videoRef.current) photo = await grabFrame(videoRef.current);
+    } catch {
+      setSceneError("Couldn't open the back camera.");
+    }
 
     try {
-      const blob = await recordClip();
-      setPhase("thinking");
+      await openCamera("user");
+    } catch {
+      setError("Couldn't reopen the front camera. Reload the page.");
+      setPhase("error");
+      return;
+    }
+    setPhase(resumeTo);
+    if (!photo) return;
 
-      const ext = blob.type.includes("mp4") ? "mp4" : "webm";
+    setSceneLoading(true);
+    try {
       const form = new FormData();
-      form.append("video", blob, `clip.${ext}`);
-
-      const res = await fetch("/api/translate", { method: "POST", body: form });
+      form.append("image", photo, "scene.jpg");
+      const res = await fetch("/api/scene", { method: "POST", body: form });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
-
-      const r = data as Result;
-      setResult(r);
-      if (r.sign !== "UNKNOWN" && r.confidence >= MIN_CONFIDENCE) {
-        setTranscript((t) => [...t, r.text]);
-        say(r.text);
+      if (!res.ok) throw new Error(data.error);
+      if (data.place === "unknown" && !data.objects?.length) {
+        setSceneError("Couldn't make out the surroundings. Try again with more light.");
+      } else {
+        setScene({ place: data.place, objects: data.objects ?? [] });
       }
-    } catch (e) {
-      setResult({ sign: "ERROR", text: e instanceof Error ? e.message : "Something went wrong", confidence: 0 });
+    } catch {
+      setSceneError("Scene scan failed. Translation still works without it.");
     } finally {
-      setPhase("ready");
+      setSceneLoading(false);
     }
   };
 
   // --- UI ----------------------------------------------------------------
-  const sentence = transcript.join(" ");
+  const latest = sentences[0];
+  const listening = phase === "listening";
+  const mirrored = facing === "user";
+  const maxSeconds = RECORDING_MAX_MS / 1000;
   const statusMessage =
     phase === "starting"
       ? "Starting camera."
-      : phase === "recording"
-        ? "Recording. Sign now."
-        : phase === "thinking"
-          ? "Reading your sign."
-          : phase === "error"
-            ? error
-            : "";
+      : phase === "scanning"
+        ? "Scanning surroundings."
+        : phase === "error"
+          ? error
+          : translating > 0
+            ? "Putting it into English."
+            : recording
+              ? "Recording."
+              : listening
+                ? "Waiting for hands."
+                : "Paused.";
+  const pill =
+    phase === "scanning"
+      ? "📷 Scanning surroundings…"
+      : !listening
+        ? "Paused"
+        : recording
+          ? `Recording 0:${String(elapsed).padStart(2, "0")} / 0:${maxSeconds}`
+          : handsVisible
+            ? "✋ Starting…"
+            : "Raise your hands to start";
 
   return (
-    <main className="mx-auto flex min-h-[100dvh] max-w-md flex-col px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))]">
+    <main
+      onPointerDown={unlockSpeech}
+      className="mx-auto flex min-h-[100dvh] max-w-md flex-col px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))]"
+    >
       <header className="flex items-start justify-between gap-2 py-2">
         <div className="min-w-0">
           <h1 className="text-2xl font-bold tracking-tight">
@@ -221,12 +665,25 @@ export default function Home() {
             aria-label="How to use Sign2MeetU"
           >
             <p>
-              Tap the round button to record one sign. Keep your hands in the camera frame. Recognized words appear in
-              the result box and build a sentence below.
+              Raise your hands into the frame and recording starts on its own. Sign one word at a time and lower your
+              hands briefly between signs. When you&apos;re finished, keep your hands down for{" "}
+              {SENTENCE_GAP_MS / 1000} seconds (or tap Done) and the app says the whole sentence.
             </p>
             <p className="mt-2">
-              The confidence rate estimates how sure the app is about a translation. Turn Voice on to hear recognized
-              words spoken aloud.
+              Recordings stop automatically after {maxSeconds} seconds. Anything shorter than{" "}
+              {RECORDING_MIN_MS / 1000} second is skipped. The round button pauses and resumes listening.
+            </p>
+            <p className="mt-2">
+              Scan surroundings takes one photo with the back camera so words like &ldquo;that&rdquo; can be named.
+              The photo is used once and not saved.
+            </p>
+            <p className="mt-2 text-[var(--muted)]">
+              Classifier: {classifier.examples} training examples from {classifier.signers} signer
+              {classifier.signers === 1 ? "" : "s"}, {classifier.covered}/{classifier.total} signs with{" "}
+              {MIN_EXAMPLES_PER_SIGN}+ examples.{" "}
+              {classifier.ready
+                ? "It can answer when Perceptron is unsure."
+                : `Until every sign is covered by ${MIN_SIGNERS}+ signers, it only gives Perceptron hints.`}
             </p>
           </aside>
         </div>
@@ -250,28 +707,36 @@ export default function Home() {
             playsInline
             muted
             autoPlay
-            className="h-full w-full -scale-x-100 object-cover"
+            className={`h-full w-full object-cover ${mirrored ? "-scale-x-100" : ""}`}
+            aria-hidden="true"
+          />
+          <canvas
+            ref={canvasRef}
+            className={`pointer-events-none absolute inset-0 h-full w-full object-cover ${mirrored ? "-scale-x-100" : ""}`}
             aria-hidden="true"
           />
 
-          {phase === "recording" && (
-            <>
-              <div className="absolute inset-0 rounded-3xl ring-4 ring-inset ring-[var(--rec)]" />
-              <div className="absolute left-3 top-3 flex items-center gap-2 rounded-full bg-black/60 px-3 py-1 text-sm text-white">
-                <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-[var(--rec)]" /> Sign now
-              </div>
-              <div className="absolute inset-x-0 bottom-0 h-1.5 bg-black/40">
-                <div
-                  className="h-full origin-left bg-[var(--rec)]"
-                  style={{ animation: `fill ${CLIP_MS}ms linear forwards` }}
-                />
-              </div>
-            </>
+          {phase !== "starting" && phase !== "error" && (
+            <div className="absolute left-3 top-3 flex items-center gap-2 rounded-full bg-black/60 px-3 py-1 text-sm text-white">
+              {recording && <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-[var(--rec)]" />}
+              {pill}
+            </div>
           )}
 
-          {phase === "thinking" && (
-            <div className="absolute inset-0 flex items-center justify-center bg-black/50 text-base text-white">
-              Reading your sign…
+          {recording && <div className="absolute inset-0 rounded-3xl ring-4 ring-inset ring-[var(--rec)]" />}
+
+          {recording && progress > 0 && (
+            <div className="absolute inset-x-0 bottom-[7%] px-4">
+              <p className="mb-1 text-center text-sm font-medium text-white drop-shadow">Stopping…</p>
+              <div className="h-1.5 rounded bg-black/40">
+                <div className="h-full rounded bg-[var(--rec)]" style={{ width: `${progress * 100}%` }} />
+              </div>
+            </div>
+          )}
+
+          {phase === "scanning" && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/30 text-base text-white">
+              Hold still. Taking one photo…
             </div>
           )}
 
@@ -304,70 +769,150 @@ export default function Home() {
         </svg>
       </div>
 
+      {/* Scene */}
+      <section className="mt-3 rounded-2xl bg-[var(--panel)] p-3 text-sm" aria-label="Surroundings">
+        <div className="flex items-center gap-2">
+          {scene ? (
+            <p className="min-w-0 flex-1 truncate font-medium">
+              📍 {scene.place}
+              {scene.objects.length > 0 && <span className="text-[var(--muted)]"> · {scene.objects.slice(0, 4).join(", ")}</span>}
+            </p>
+          ) : (
+            <p className="min-w-0 flex-1 text-[var(--muted)]">No surroundings scanned</p>
+          )}
+          {scene && (
+            <button
+              onClick={() => setScene(null)}
+              className="min-h-11 min-w-11 rounded-full bg-[var(--bg)] px-3 text-sm"
+              aria-label="Clear surroundings"
+            >
+              ✕
+            </button>
+          )}
+          <button
+            onClick={scanScene}
+            disabled={!canScan}
+            className="min-h-11 shrink-0 rounded-full bg-[var(--ink)] px-3 text-sm text-white disabled:opacity-40"
+          >
+            {sceneLoading ? "Reading…" : scene ? "Rescan" : "Scan surroundings"}
+          </button>
+        </div>
+        <p className="mt-1 text-xs text-[var(--muted)]">
+          {sceneError ||
+            (recording ? "Finish signing to scan." : "Uses the back camera. Photo is used once and not saved.")}
+        </p>
+      </section>
+
       {/* Result */}
       <section
         id="result"
-        className="mt-4 mb-2 min-h-[5.5rem] rounded-2xl bg-[var(--ink)] p-4 text-white"
-        aria-label="Sign result"
+        className="mt-3 mb-2 min-h-[5.5rem] rounded-2xl bg-[var(--ink)] p-4 text-white"
+        aria-label="Translation"
         aria-live="polite"
         aria-atomic="true"
       >
-        {!result && phase !== "thinking" && (
-          <p className="text-white">Tap the button, then sign one word. Keep both hands in frame.</p>
-        )}
-        {result && result.sign === "ERROR" && <p className="text-white">{result.text}</p>}
-        {result && result.sign === "UNKNOWN" && (
-          <p className="text-white">Didn't catch that. Try again a little slower, with good lighting.</p>
-        )}
-        {result && result.sign !== "UNKNOWN" && result.sign !== "ERROR" && (
-          <div>
-            <div className="flex items-end justify-between gap-3">
-              <p className="text-4xl font-bold leading-tight">{result.text}</p>
-              <div className="shrink-0 text-right">
-                <p className="text-sm text-white">
-                  {Math.round(result.confidence * 100)}%{result.confidence < MIN_CONFIDENCE && " · unsure"}
-                </p>
-                <p className="text-xs text-white">Confidence rate</p>
-              </div>
+        {translating > 0 ? (
+          <p className="text-white">Putting it into English…</p>
+        ) : notice ? (
+          <p className="text-white">{notice}</p>
+        ) : latest ? (
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-3xl font-bold leading-tight">{latest.text}</p>
+              <p className="mt-1 text-xs text-white/80">
+                Signed: {latest.glosses.join(" · ")}
+                {latest.scenePlace && ` · 📍 ${latest.scenePlace}`}
+              </p>
             </div>
+            <button
+              onClick={() => say(latest.text)}
+              className="min-h-11 shrink-0 rounded-full bg-white/15 px-3 py-1.5 text-sm text-white"
+            >
+              Replay
+            </button>
           </div>
+        ) : (
+          <p className="text-white">
+            {!listening
+              ? "Paused. Tap the round button to resume."
+              : recording
+                ? "Sign one word at a time. Lower your hands between signs."
+                : `Raise your hands to start signing. Keep them down for ${SENTENCE_GAP_MS / 1000} seconds when you're done.`}
+          </p>
         )}
       </section>
 
-      {/* Transcript */}
+      {/* Transcript: signs in progress, then earlier sentences */}
       <section
         className="mt-3 mb-5 flex min-h-0 flex-1 items-start gap-2 rounded-2xl bg-[#905fc1] p-4 text-white"
         aria-label="Transcript"
       >
-        <p className="flex-1 overflow-y-auto text-lg leading-snug text-white">
-          {sentence || "Your sentence builds up here."}
-        </p>
-        {transcript.length > 0 && (
-          <div className="flex shrink-0 gap-2">
-            <button onClick={() => say(sentence)} className="min-h-11 rounded-full bg-[var(--ink)] px-3 py-1.5 text-sm text-white">
-              Replay
-            </button>
-            <button onClick={() => setTranscript([])} className="min-h-11 rounded-full bg-[var(--ink)] px-3 py-1.5 text-sm text-white">
+        <div className="min-w-0 flex-1 overflow-y-auto">
+          {glosses.length > 0 ? (
+            <ul className="flex flex-wrap gap-1.5" aria-label="Signs so far">
+              {glosses.map((g) => (
+                <li
+                  key={g.id}
+                  className={`rounded-full px-3 py-1 text-base ${
+                    g.status === "done" ? "bg-[var(--ink)]" : "bg-white/20"
+                  }`}
+                  title={g.via ? `Recognized by ${g.via}` : undefined}
+                >
+                  {g.status === "pending" ? "…" : g.status === "skipped" ? "?" : g.text}
+                  {g.target && <span className="text-white/75"> · {g.target}</span>}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-lg leading-snug text-white">
+              {sentences.length > 1 ? "Earlier:" : "Signs appear here as you make them."}
+            </p>
+          )}
+          {sentences.length > 1 && (
+            <ol className="mt-2 space-y-1 text-base leading-snug text-white/90">
+              {sentences.slice(1).map((s) => (
+                <li key={s.id}>{s.text}</li>
+              ))}
+            </ol>
+          )}
+        </div>
+        {(glosses.length > 0 || sentences.length > 0) && (
+          <div className="flex shrink-0 flex-col gap-2">
+            {glosses.length > 0 && (
+              <button onClick={undo} className="min-h-11 rounded-full bg-[var(--ink)] px-3 py-1.5 text-sm text-white">
+                Undo
+              </button>
+            )}
+            <button onClick={clearAll} className="min-h-11 rounded-full bg-[var(--ink)] px-3 py-1.5 text-sm text-white">
               Clear
             </button>
           </div>
         )}
       </section>
 
-      {/* Record button */}
-      <div className="flex justify-center pt-3">
+      {/* Controls */}
+      <div className="relative flex items-center justify-center pt-3">
         <button
-          onClick={handleRecord}
-          disabled={phase !== "ready"}
-          aria-label={phase === "recording" ? "Recording sign" : "Record a sign"}
+          onClick={toggleListening}
+          disabled={phase !== "ready" && phase !== "listening"}
+          aria-label={listening ? "Pause listening" : "Resume listening"}
+          aria-pressed={!listening}
           className="flex h-20 w-20 items-center justify-center rounded-full border-4 border-[var(--ink)] transition active:scale-95 disabled:opacity-40"
         >
           <span
             className={`block bg-[var(--rec)] transition-all ${
-              phase === "recording" ? "h-7 w-7 rounded-md" : "h-14 w-14 rounded-full"
+              listening ? "h-7 w-7 rounded-md" : "h-14 w-14 rounded-full"
             }`}
           />
         </button>
+        {recording && (
+          <button
+            onClick={finishNow}
+            className="absolute right-0 min-h-11 rounded-full bg-[var(--ink)] px-4 py-2 text-sm font-semibold text-white"
+          >
+            Done
+          </button>
+        )}
       </div>
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {statusMessage}

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { SYSTEM_PROMPT, USER_PROMPT, RESPONSE_SCHEMA } from "@/lib/prompt";
-import { VOCAB_KEYS, UNKNOWN, textFor } from "@/lib/vocab";
+import { SYSTEM_PROMPT, RESPONSE_SCHEMA, userPromptWithCandidates, type Candidate } from "@/lib/prompt";
+import { VOCAB_KEYS, UNKNOWN, POINTING_KEYS, textFor } from "@/lib/vocab";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -8,16 +8,18 @@ export const maxDuration = 30;
 const MAX_BYTES = 4 * 1024 * 1024; // stay under Vercel's ~4.5 MB body limit
 const PERCEPTRON_BASE = "https://api.perceptron.inc/v1";
 
-type Result = { sign: string; confidence: number };
+type Result = { sign: string; confidence: number; target?: string };
 type VideoPart = Record<string, unknown>;
 
 export async function POST(req: Request) {
   const started = Date.now();
 
   let file: File | null = null;
+  let candidates: Candidate[] = [];
   try {
     const form = await req.formData();
     file = form.get("video") as File | null;
+    candidates = parseCandidates(form.get("candidates"));
   } catch {
     return NextResponse.json({ error: "Expected multipart form data with a 'video' field." }, { status: 400 });
   }
@@ -37,10 +39,11 @@ export async function POST(req: Request) {
   }
 
   const errors: string[] = [];
+  const userPrompt = userPromptWithCandidates(candidates);
 
   // 1) Perceptron Mk1.5, the primary (and for the Perceptron track, the only) model.
   try {
-    const { result, via } = await callPerceptron(bytes, mime);
+    const { result, via } = await callPerceptron(bytes, mime, userPrompt);
     return respond(result, `perceptron (${via})`, started);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -51,7 +54,7 @@ export async function POST(req: Request) {
   // 2) Optional emergency fallback. Leave GEMINI_API_KEY blank to keep this 100% Perceptron.
   if (process.env.GEMINI_API_KEY) {
     try {
-      return respond(await callGemini(bytes.toString("base64"), mime), "gemini (fallback)", started);
+      return respond(await callGemini(bytes.toString("base64"), mime, userPrompt), "gemini (fallback)", started);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error("[translate] gemini failed:", msg);
@@ -65,7 +68,25 @@ export async function POST(req: Request) {
 function respond(raw: Result, provider: string, started: number) {
   const sign = VOCAB_KEYS.includes(raw.sign) ? raw.sign : UNKNOWN;
   const confidence = Math.max(0, Math.min(1, Number(raw.confidence) || 0));
-  return NextResponse.json({ sign, text: textFor(sign), confidence, provider, ms: Date.now() - started });
+  // Only pointing signs carry a target (the body part or object pointed at).
+  const target =
+    POINTING_KEYS.includes(sign) && typeof raw.target === "string" ? raw.target.trim().toLowerCase().slice(0, 40) : "";
+  return NextResponse.json({ sign, text: textFor(sign), confidence, target, provider, ms: Date.now() - started });
+}
+
+// Optional form field: JSON array of the on-device classifier's top guesses.
+function parseCandidates(raw: FormDataEntryValue | null): Candidate[] {
+  if (typeof raw !== "string" || !raw) return [];
+  try {
+    const list = JSON.parse(raw);
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter((c) => c && VOCAB_KEYS.includes(c.label) && c.label !== UNKNOWN)
+      .map((c) => ({ label: c.label as string, score: Math.max(0, Math.min(1, Number(c.score) || 0)) }))
+      .slice(0, 3);
+  } catch {
+    return [];
+  }
 }
 
 function parseJson(text: string): Result {
@@ -82,13 +103,13 @@ function parseJson(text: string): Result {
 //   inline - base64 data URL in a `video_url` part (fastest: one request)
 //   upload - upload via the Files API, then reference it with `video_file_id`
 //   auto   - try inline, and if Perceptron rejects it, retry with upload (default)
-async function callPerceptron(bytes: Buffer, mime: string): Promise<{ result: Result; via: string }> {
+async function callPerceptron(bytes: Buffer, mime: string, userPrompt: string): Promise<{ result: Result; via: string }> {
   const mode = (process.env.PERCEPTRON_VIDEO_MODE || "auto").toLowerCase();
 
   if (mode !== "upload") {
     try {
       const part = { type: "video_url", video_url: { url: `data:${mime};base64,${bytes.toString("base64")}` } };
-      return { result: await perceptronChat(part), via: "inline" };
+      return { result: await perceptronChat(part, userPrompt), via: "inline" };
     } catch (e) {
       if (mode === "inline") throw e;
       console.warn("[translate] inline video failed, retrying via file upload:", e instanceof Error ? e.message : e);
@@ -97,10 +118,10 @@ async function callPerceptron(bytes: Buffer, mime: string): Promise<{ result: Re
 
   const fileId = await uploadToPerceptron(bytes, mime);
   const part = { type: "video_file_id", video_file_id: { file_id: fileId } };
-  return { result: await perceptronChat(part), via: "upload" };
+  return { result: await perceptronChat(part, userPrompt), via: "upload" };
 }
 
-async function perceptronChat(videoPart: VideoPart): Promise<Result> {
+async function perceptronChat(videoPart: VideoPart, userPrompt: string): Promise<Result> {
   const res = await fetch(`${PERCEPTRON_BASE}/chat/completions`, {
     method: "POST",
     headers: {
@@ -113,7 +134,7 @@ async function perceptronChat(videoPart: VideoPart): Promise<Result> {
       max_completion_tokens: 200,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: [videoPart, { type: "text", text: USER_PROMPT }] },
+        { role: "user", content: [videoPart, { type: "text", text: userPrompt }] },
       ],
       response_format: {
         type: "json_schema",
@@ -151,7 +172,7 @@ async function uploadToPerceptron(bytes: Buffer, mime: string): Promise<string> 
 }
 
 // --- Optional Gemini fallback (REST, no SDK needed) -------------------------
-async function callGemini(base64: string, mime: string): Promise<Result> {
+async function callGemini(base64: string, mime: string, userPrompt: string): Promise<Result> {
   const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
@@ -163,7 +184,7 @@ async function callGemini(base64: string, mime: string): Promise<Result> {
     headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY! },
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-      contents: [{ role: "user", parts: [{ inline_data: { mime_type: mime, data: base64 } }, { text: USER_PROMPT }] }],
+      contents: [{ role: "user", parts: [{ inline_data: { mime_type: mime, data: base64 } }, { text: userPrompt }] }],
       generationConfig: { temperature: 0, responseMimeType: "application/json", responseSchema: geminiSchema },
     }),
   });
