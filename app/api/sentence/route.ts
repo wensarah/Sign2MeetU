@@ -19,7 +19,7 @@ const MAX_HISTORY = 3;
 const POINTING = ["THAT", "THIS", "THERE", "IT", "POINT"];
 
 type Gloss = { gloss: string; target: string };
-type Scene = { place: string; objects: string[] };
+type Scene = { place: string; objects: string[]; text: string[] };
 
 const SYSTEM_PROMPT = `You translate American Sign Language (ASL) glosses into natural English, spoken aloud for a hearing person.
 
@@ -37,6 +37,7 @@ Rules:
 - A bracketed target always wins over the scene. Use the scene only for pointing words WITHOUT a bracketed target, and for natural wording (for example "restroom" in a restaurant).
 - If a scene is provided and a pointing word (THAT, THIS, THERE, IT) has no bracketed target, name the scene object the signer most likely means. Scene objects are listed most prominent first; pick the first one that makes sense with the other signs.
 - If there is no target and no scene, keep pointing words as they are ("that", "there").
+- Readable signs/text in the scene may be used to name a place or thing the signer referred to with the same meaning (e.g. BATHROOM with a sign reading "Restroom" -> "restroom"). Never add room numbers, directions or answers from the text that the signer didn't sign.
 - Earlier sentences (if given) are only for resolving references like "more" or "that one". Do not repeat them.
 - If the glosses contain UNKNOWN, skip that sign.
 - Use a question mark for questions.
@@ -114,13 +115,16 @@ function parseGlosses(raw: unknown): Gloss[] | null {
 
 function parseScene(raw: unknown): Scene | null {
   if (!raw || typeof raw !== "object") return null;
-  const { place, objects } = raw as { place?: unknown; objects?: unknown };
+  const { place, objects, text } = raw as { place?: unknown; objects?: unknown; text?: unknown };
   const cleanPlace = cleanText(place, 60);
   const cleanObjects = Array.isArray(objects)
     ? objects.map((o) => cleanText(o, 40)).filter(Boolean).slice(0, MAX_OBJECTS)
     : [];
-  if ((!cleanPlace || cleanPlace.toLowerCase() === "unknown") && cleanObjects.length === 0) return null;
-  return { place: cleanPlace, objects: cleanObjects };
+  const cleanText_ = Array.isArray(text) ? text.map((t) => cleanText(t, 40)).filter(Boolean).slice(0, 5) : [];
+  if ((!cleanPlace || cleanPlace.toLowerCase() === "unknown") && cleanObjects.length === 0 && cleanText_.length === 0) {
+    return null;
+  }
+  return { place: cleanPlace, objects: cleanObjects, text: cleanText_ };
 }
 
 function parseHistory(raw: unknown): string[] {
@@ -134,6 +138,7 @@ function userPrompt(glosses: Gloss[], scene: Scene | null, history: string[]): s
   lines.push(`Glosses: ${glosses.map((g) => (g.target ? `${g.gloss}[${g.target}]` : g.gloss)).join(" ")}`);
   if (scene) {
     lines.push(`Scene: ${scene.place || "unknown place"}${scene.objects.length ? `; visible objects: ${scene.objects.join(", ")}` : ""}`);
+    if (scene.text.length) lines.push(`Readable signs/text in the scene: ${scene.text.map((t) => `"${t}"`).join(", ")}`);
     const unresolved = glosses.filter((g) => POINTING.includes(g.gloss) && !g.target).map((g) => g.gloss);
     if (unresolved.length && scene.objects.length) {
       lines.push(`The signer pointed (${unresolved.join(", ")}) without a known target. Name which scene object they mean in the sentence.`);

@@ -10,7 +10,9 @@
 //                 ──► /api/sentence ──► show + speak
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { HandLandmarker } from "@mediapipe/tasks-vision";
+import type { HandLandmarkerResult } from "@mediapipe/tasks-vision";
 import { loadHandLandmarker, frameFeatures, makeFingerprint, drawHands, type Frame } from "@/lib/landmarks";
+import { findPoint, findLocation, drawMark, type PointMark } from "@/lib/pointing";
 import { predict, mergeDatasets, emptyDataset, type Dataset, type Prediction } from "@/lib/knn";
 import {
   SignSegmenter,
@@ -26,24 +28,35 @@ const KNN_FALLBACK = 0.6; // classifier confidence needed when Perceptron can't 
 const MIN_EXAMPLES_PER_SIGN = 3; // before that, the classifier only gives Perceptron hints
 const MIN_SIGNERS = 2; // ...and the same until at least this many people have recorded
 const DATASET_STORAGE_KEY = "sign2meetu-dataset"; // where /train saves examples on this device
-const SCENE_WIDTH = 640;
-const IDLE_CLIP_MS = 3000; // max lead-in before a sign in the clip sent to Perceptron
+const SCENE_WIDTH = 1024; // back-camera scan: more pixels = better object detection
+const BACKGROUND_WIDTH = 640; // front-camera background while signing: speed matters more
+const MARK_WIDTH = 960; // pointing stills
+// Signs whose target is looked up on a marked still: a ray from the fingertip, or a circle.
+const MARK_MODE: Record<string, PointMark["mode"]> = { THAT: "point", PAIN: "location" };
+// Max lead-in before a sign in the clip sent to Perceptron. Keep it short: the
+// model samples a limited number of frames, so idle time steals frames from the sign.
+const IDLE_CLIP_MS = 1000;
+const MARK_EVERY_MS = 150; // at most one pointing-still copy per this many ms (keeps hand tracking fast)
 const AUTO_SCENE_WAIT_MS = 1500; // how long a finished sentence waits for the background scene
 const HISTORY_SENTENCES = 2; // recent sentences sent along for context
 
 type Phase = "starting" | "ready" | "listening" | "scanning" | "error";
 type Facing = "user" | "environment";
-type Scene = { place: string; objects: string[] };
+type Scene = { place: string; objects: string[]; text: string[] };
+/** Best still of each kind captured during one sign (see lib/pointing.ts). */
+type MarkCapture = { canvas: HTMLCanvasElement; mark: PointMark; score: number; at: number };
+type SignCaptures = { point?: MarkCapture; location?: MarkCapture };
 type PerceptronResult = { sign: string; text: string; confidence: number; target?: string };
 type Gloss = {
   id: number;
   status: "pending" | "done" | "skipped";
   key?: string;
   text?: string;
-  target?: string; // body part or object pointed at (HERE, THAT, PAIN)
+  target?: string; // body part or object pointed at (THAT, PAIN)
+  markUrl?: string; // the marked still Perceptron looked at, if any
   via?: "perceptron" | "classifier";
 };
-type Sentence = { id: number; text: string; glosses: string[]; scenePlace: string };
+type Sentence = { id: number; text: string; glosses: string[]; scenePlace: string; marks: string[] };
 
 // iOS Safari records mp4; Chrome/Android record webm. Pick what this browser supports.
 function pickMimeType(): string {
@@ -94,8 +107,32 @@ function mergeScenes(manual: Scene | null, auto: Scene | null): Scene | null {
   if (!auto) return manual;
   // The deliberate scan is more specific, so it comes first.
   const objects = [...new Set([...manual.objects, ...auto.objects])].slice(0, 8);
-  return { place: manual.place || auto.place, objects };
+  const text = [...new Set([...manual.text, ...auto.text])].slice(0, 5);
+  return { place: manual.place || auto.place, objects, text };
 }
+
+function toScene(data: { place?: string; objects?: string[]; text?: string[] }): Scene | null {
+  const place = data.place ?? "";
+  const objects = data.objects ?? [];
+  const text = data.text ?? [];
+  if ((!place || place === "unknown") && !objects.length && !text.length) return null;
+  return { place, objects, text };
+}
+
+/** Copy the current video frame into a new canvas (at most `width` pixels wide). */
+function snapshot(video: HTMLVideoElement, width: number): HTMLCanvasElement {
+  const vw = video.videoWidth || width;
+  const vh = video.videoHeight || Math.round(width * 0.75);
+  const scale = Math.min(1, width / vw);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(vw * scale);
+  canvas.height = Math.round(vh * scale);
+  canvas.getContext("2d")!.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+const toJpeg = (canvas: HTMLCanvasElement, quality: number): Promise<Blob | null> =>
+  new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -108,6 +145,8 @@ export default function Home() {
   const datasetRef = useRef<Dataset>(emptyDataset());
   const clipRef = useRef<{ recorder: MediaRecorder; done: Promise<Blob | null>; startedAt: number } | null>(null);
   const clipTickRef = useRef<(now: number, signing: boolean) => void>(() => {});
+  const capturesRef = useRef<SignCaptures>({}); // pointing stills for the sign in progress
+  const pointTickRef = useRef<(result: HandLandmarkerResult, video: HTMLVideoElement, now: number) => void>(() => {});
   const pendingRef = useRef<{ id: number; job: Promise<Gloss> }[]>([]); // signs in the current sentence
   const phaseRef = useRef<Phase>("starting");
   const sceneRef = useRef<Scene | null>(null); // from the back-camera scan
@@ -153,8 +192,9 @@ export default function Home() {
       audio: false,
       video: {
         facingMode,
-        width: { ideal: 640 },
-        height: { ideal: 480 },
+        // Front: small frames keep hand tracking fast. Back (scene scan): more detail for object detection.
+        width: { ideal: facingMode === "environment" ? 1280 : 640 },
+        height: { ideal: facingMode === "environment" ? 960 : 480 },
         frameRate: { ideal: 24, max: 30 },
       },
     });
@@ -250,6 +290,7 @@ export default function Home() {
             const seg = segmenterRef.current;
             for (const ev of seg.push(frameFeatures(result), now)) handlersRef.current(ev);
             clipTickRef.current(now, seg.signing);
+            if (seg.signing) pointTickRef.current(result, v, now);
             setRecording(seg.recording);
             setElapsed(Math.floor(seg.recordingMs(now) / 1000));
             setProgress(Math.round(seg.sentenceProgress(now) * 20) / 20);
@@ -333,8 +374,51 @@ export default function Home() {
     return clip.done;
   };
 
+  // --- Pointing stills: keep the clearest pointing / jab frame of each sign ----
+  pointTickRef.current = (result: HandLandmarkerResult, video: HTMLVideoElement, now: number) => {
+    const caps = capturesRef.current;
+    const keep = (kind: keyof SignCaptures, found: { score: number; mark: PointMark } | null) => {
+      const prev = caps[kind];
+      if (!found || (prev && (found.score <= prev.score || now - prev.at < MARK_EVERY_MS))) return;
+      // Reuse this sign's canvas instead of allocating a new one every time.
+      const canvas = prev?.canvas ?? snapshot(video, MARK_WIDTH);
+      if (prev) canvas.getContext("2d")!.drawImage(video, 0, 0, canvas.width, canvas.height);
+      caps[kind] = { canvas, mark: found.mark, score: found.score, at: now };
+    };
+    keep("point", findPoint(result));
+    keep("location", findLocation(result));
+  };
+
+  /** Ask Perceptron what the marked still points at. Returns "" if it can't tell. */
+  const lookUpTarget = async (capture: MarkCapture): Promise<{ target: string; url: string }> => {
+    drawMark(capture.canvas, capture.mark);
+    const photo = await toJpeg(capture.canvas, 0.85);
+    if (!photo) return { target: "", url: "" };
+    const url = URL.createObjectURL(photo); // shown in the result so people can see what Perceptron saw
+    try {
+      const form = new FormData();
+      form.append("image", photo, "point.jpg");
+      form.append("mode", capture.mark.mode);
+      const res = await fetch("/api/point", { method: "POST", body: form });
+      const data = await res.json();
+      return { target: res.ok && data.kind !== "unknown" ? data.target ?? "" : "", url };
+    } catch {
+      return { target: "", url };
+    }
+  };
+
   // --- Recognize one sign --------------------------------------------------
-  const recognize = async (frames: (Frame | null)[], clip: Promise<Blob | null>) => {
+  const recognize = async (frames: (Frame | null)[], clip: Promise<Blob | null>, caps: SignCaptures) => {
+    const pick = await recognizeSign(frames, clip);
+    const mode = pick && MARK_MODE[pick.key];
+    const capture = mode === "point" ? caps.point : mode === "location" ? caps.location : undefined;
+    if (!pick || !capture) return pick ? { ...pick, markUrl: "" } : null;
+    // A marked still is more precise than the video clip; keep the clip's guess as backup.
+    const { target, url } = await lookUpTarget(capture);
+    return { ...pick, target: target || pick.target, markUrl: url };
+  };
+
+  const recognizeSign = async (frames: (Frame | null)[], clip: Promise<Blob | null>) => {
     const seq = makeFingerprint(frames);
     const examples = datasetRef.current.examples;
     const knn = seq && examples.length ? predict(seq, examples) : null;
@@ -352,7 +436,16 @@ export default function Home() {
         /* network trouble: fall back to the classifier */
       }
     }
-    return decide(perceptron, knn, classifierCoverage(datasetRef.current).ready);
+    const pick = decide(perceptron, knn, classifierCoverage(datasetRef.current).ready);
+    // Open the browser console to see which recognizer got each sign right or wrong.
+    console.info(
+      `[sign] → ${pick ? `${pick.key} (via ${pick.via})` : "skipped"} | Perceptron: ${
+        perceptron ? `${perceptron.sign} ${Math.round(perceptron.confidence * 100)}%` : "no answer"
+      } | classifier: ${knn ? knn.top.map((t) => `${t.label} ${Math.round(t.score * 100)}%`).join(", ") : "none"} | clip ${
+        blob ? `${Math.round(blob.size / 1024)} KB` : "missing"
+      }`
+    );
+    return pick;
   };
 
   // --- Background scene, captured from the front camera while signing --------
@@ -360,15 +453,13 @@ export default function Home() {
     const video = videoRef.current;
     if (!video) return null;
     try {
-      const photo = await grabFrame(video);
+      const photo = await toJpeg(snapshot(video, BACKGROUND_WIDTH), 0.7);
       if (!photo) return null;
       const form = new FormData();
       form.append("image", photo, "background.jpg");
       const res = await fetch("/api/scene", { method: "POST", body: form });
       if (!res.ok) return null;
-      const data = await res.json();
-      if (!data.place || (data.place === "unknown" && !data.objects?.length)) return null;
-      return { place: data.place, objects: data.objects ?? [] };
+      return toScene(await res.json());
     } catch {
       return null; // translation still works without it
     }
@@ -438,7 +529,8 @@ export default function Home() {
 
       historyRef.current = [...historyRef.current, text].slice(-5);
       setNotice("");
-      setSentences((s) => [{ id: ++idRef.current, text, glosses: shown, scenePlace }, ...s]);
+      const marks = done.map((r) => r.markUrl).filter((u): u is string => Boolean(u));
+      setSentences((s) => [{ id: ++idRef.current, text, glosses: shown, scenePlace, marks }, ...s]);
       say(text);
     } finally {
       setTranslating((n) => n - 1);
@@ -452,15 +544,19 @@ export default function Home() {
       autoSceneRef.current = captureAutoScene();
     } else if (ev.type === "signStart") {
       startClip(); // normally already running (see clipTickRef)
+      capturesRef.current = {};
     } else if (ev.type === "signCancel") {
       stopClip();
       startClip();
+      capturesRef.current = {};
     } else if (ev.type === "signEnd") {
       const clip = stopClip();
       startClip(); // the next sign's clip starts right away
+      const caps = capturesRef.current;
+      capturesRef.current = {};
       const id = ++idRef.current;
       setGlosses((g) => [...g, { id, status: "pending" }]);
-      const job = recognize(ev.frames, clip)
+      const job = recognize(ev.frames, clip, caps)
         .catch(() => null)
         .then((pick) => {
           const gloss: Gloss = pick
@@ -470,6 +566,7 @@ export default function Home() {
                 key: pick.key,
                 text: textFor(pick.key) || pick.key,
                 target: pick.target || undefined,
+                markUrl: pick.markUrl || undefined,
                 via: pick.via,
               }
             : { id, status: "skipped" };
@@ -520,6 +617,7 @@ export default function Home() {
     autoSceneRef.current = null;
     historyRef.current = [];
     segmenterRef.current.reset();
+    for (const s of sentences) s.marks.forEach((u) => URL.revokeObjectURL(u));
     setGlosses([]);
     setSentences([]);
     setNotice("");
@@ -529,15 +627,6 @@ export default function Home() {
   // --- Scene scan (back camera, one photo) -------------------------------------
   // Phones can't run both cameras at once, so scanning waits until no recording is in progress.
   const canScan = (phase === "ready" || phase === "listening") && !recording && !sceneLoading;
-
-  const grabFrame = (video: HTMLVideoElement): Promise<Blob | null> => {
-    const scale = Math.min(1, SCENE_WIDTH / (video.videoWidth || SCENE_WIDTH));
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.round((video.videoWidth || SCENE_WIDTH) * scale);
-    canvas.height = Math.round((video.videoHeight || 480) * scale);
-    canvas.getContext("2d")!.drawImage(video, 0, 0, canvas.width, canvas.height);
-    return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.7));
-  };
 
   const scanScene = async () => {
     if (!canScan) return;
@@ -552,7 +641,7 @@ export default function Home() {
     try {
       await openCamera("environment");
       await sleep(800); // let the camera focus and adjust exposure
-      if (videoRef.current) photo = await grabFrame(videoRef.current);
+      if (videoRef.current) photo = await toJpeg(snapshot(videoRef.current, SCENE_WIDTH), 0.8);
     } catch {
       setSceneError("Couldn't open the back camera.");
     }
@@ -574,11 +663,9 @@ export default function Home() {
       const res = await fetch("/api/scene", { method: "POST", body: form });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      if (data.place === "unknown" && !data.objects?.length) {
-        setSceneError("Couldn't make out the surroundings. Try again with more light.");
-      } else {
-        setScene({ place: data.place, objects: data.objects ?? [] });
-      }
+      const scanned = toScene(data);
+      if (!scanned) setSceneError("Couldn't make out the surroundings. Try again with more light.");
+      else setScene(scanned);
     } catch {
       setSceneError("Scene scan failed. Translation still works without it.");
     } finally {
@@ -776,6 +863,7 @@ export default function Home() {
             <p className="min-w-0 flex-1 truncate font-medium">
               📍 {scene.place}
               {scene.objects.length > 0 && <span className="text-[var(--muted)]"> · {scene.objects.slice(0, 4).join(", ")}</span>}
+              {scene.text.length > 0 && <span className="text-[var(--muted)]"> · “{scene.text.slice(0, 2).join("”, “")}”</span>}
             </p>
           ) : (
             <p className="min-w-0 flex-1 text-[var(--muted)]">No surroundings scanned</p>
@@ -823,6 +911,19 @@ export default function Home() {
                 Signed: {latest.glosses.join(" · ")}
                 {latest.scenePlace && ` · 📍 ${latest.scenePlace}`}
               </p>
+              {latest.marks.length > 0 && (
+                <div className="mt-2 flex gap-2" aria-label="What Perceptron looked at for pointing signs">
+                  {latest.marks.map((url) => (
+                    // eslint-disable-next-line @next/next/no-img-element -- local blob URL, not an optimizable asset
+                    <img
+                      key={url}
+                      src={url}
+                      alt="Camera still with the pointing direction marked in green"
+                      className="h-16 -scale-x-100 rounded-lg object-cover"
+                    />
+                  ))}
+                </div>
+              )}
             </div>
             <button
               onClick={() => say(latest.text)}
