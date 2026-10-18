@@ -166,9 +166,19 @@ export default function Home() {
 
   // --- UI ----------------------------------------------------------------
   const sentence = transcript.join(" ");
+  const statusMessage =
+    phase === "starting"
+      ? "Starting camera."
+      : phase === "recording"
+        ? "Recording. Sign now."
+        : phase === "thinking"
+          ? "Reading your sign."
+          : phase === "error"
+            ? error
+            : "";
 
   return (
-    <main className="mx-auto flex h-[100dvh] max-w-md flex-col px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))]">
+    <main className="mx-auto flex min-h-[100dvh] max-w-md flex-col px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))]">
       <header className="flex items-center justify-between py-2">
         <h1 className="text-lg font-bold tracking-tight">
           Sign<span className="text-[var(--accent)]">Bridge</span>
@@ -176,14 +186,17 @@ export default function Home() {
         <div className="flex gap-2">
           <button
             onClick={() => setSpeak((s) => !s)}
-            className="rounded-full bg-[var(--panel)] px-3 py-1.5 text-sm"
+            className="min-h-11 rounded-full bg-[var(--panel)] px-3 py-1.5 text-sm"
             aria-pressed={speak}
           >
             {speak ? "🔊 Voice on" : "🔇 Voice off"}
           </button>
           <button
             onClick={() => setShowDebug((d) => !d)}
-            className="rounded-full bg-[var(--panel)] px-3 py-1.5 text-sm text-[var(--muted)]"
+            className="min-h-11 min-w-11 rounded-full bg-[var(--panel)] px-3 py-1.5 text-sm text-[var(--muted)]"
+            aria-label="Toggle diagnostics"
+            aria-expanded={showDebug}
+            aria-controls="result"
           >
             ⓘ
           </button>
@@ -191,13 +204,17 @@ export default function Home() {
       </header>
 
       {/* Camera */}
-      <section className="relative mt-2 aspect-[3/4] w-full overflow-hidden rounded-3xl bg-[var(--panel)]">
+      <section
+        className="relative mt-2 aspect-[3/4] w-full overflow-hidden rounded-3xl bg-[var(--panel)]"
+        aria-label="Camera preview"
+      >
         <video
           ref={videoRef}
           playsInline
           muted
           autoPlay
           className="h-full w-full -scale-x-100 object-cover"
+          aria-hidden="true"
         />
 
         {phase === "recording" && (
@@ -235,7 +252,13 @@ export default function Home() {
       </section>
 
       {/* Result */}
-      <section className="mt-4 min-h-[5.5rem] rounded-2xl bg-[var(--panel)] p-4" aria-live="polite">
+      <section
+        id="result"
+        className="mt-4 min-h-[5.5rem] rounded-2xl bg-[var(--panel)] p-4"
+        aria-label="Sign result"
+        aria-live="polite"
+        aria-atomic="true"
+      >
         {!result && phase !== "thinking" && (
           <p className="text-[var(--muted)]">Tap the button, then sign one word. Keep both hands in frame.</p>
         )}
@@ -263,16 +286,16 @@ export default function Home() {
       </section>
 
       {/* Transcript */}
-      <section className="mt-3 flex min-h-0 flex-1 items-start gap-2">
+      <section className="mt-3 flex min-h-0 flex-1 items-start gap-2" aria-label="Transcript">
         <p className="flex-1 overflow-y-auto text-lg leading-snug text-[var(--muted)]">
           {sentence || "Your sentence builds up here."}
         </p>
         {transcript.length > 0 && (
           <div className="flex shrink-0 gap-2">
-            <button onClick={() => say(sentence)} className="rounded-full bg-[var(--panel)] px-3 py-1.5 text-sm">
+            <button onClick={() => say(sentence)} className="min-h-11 rounded-full bg-[var(--panel)] px-3 py-1.5 text-sm">
               Replay
             </button>
-            <button onClick={() => setTranscript([])} className="rounded-full bg-[var(--panel)] px-3 py-1.5 text-sm">
+            <button onClick={() => setTranscript([])} className="min-h-11 rounded-full bg-[var(--panel)] px-3 py-1.5 text-sm">
               Clear
             </button>
           </div>
@@ -284,7 +307,7 @@ export default function Home() {
         <button
           onClick={handleRecord}
           disabled={phase !== "ready"}
-          aria-label="Record a sign"
+          aria-label={phase === "recording" ? "Recording sign" : "Record a sign"}
           className="flex h-20 w-20 items-center justify-center rounded-full border-4 border-[var(--ink)] transition active:scale-95 disabled:opacity-40"
         >
           <span
@@ -294,6 +317,9 @@ export default function Home() {
           />
         </button>
       </div>
+      <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {statusMessage}
+      </p>
     </main>
   );
 }
