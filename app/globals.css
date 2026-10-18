@@ -1,10 +1,10 @@
 @import "tailwindcss";
 
 :root {
-  --bg: #0b0f14;
+  --bg: #5b3b82;
   --panel: #141a22;
   --ink: #eef2f6;
-  --muted: #8a96a6;
+  --muted: #c6b8d9;
   --accent: #f5b83d;
   --rec: #ef4444;
 }
@@ -22,7 +22,23 @@ body {
   font-family: ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
+button:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+}
+
 @keyframes fill {
   from { transform: scaleX(0); }
   to { transform: scaleX(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }
