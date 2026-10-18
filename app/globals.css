@@ -1,12 +1,12 @@
 @import "tailwindcss";
 
 :root {
-  --bg: #5b3b82;
-  --panel: #141a22;
-  --ink: #eef2f6;
-  --muted: #c6b8d9;
-  --accent: #f5b83d;
-  --rec: #ef4444;
+  --bg: #c6a8ed;
+  --panel: #f4edff;
+  --ink: #210a40;
+  --muted: #594477;
+  --accent: #51277f;
+  --rec: #811540;
 }
 
 html,
@@ -22,7 +22,18 @@ body {
   font-family: ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
-button:focus-visible {
+main section {
+  box-shadow: 0 6px 20px rgb(33 10 64 / 12%);
+}
+
+.camera-bubble-frame {
+  clip-path: url(#camera-bubble-clip);
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 3px;
 }
