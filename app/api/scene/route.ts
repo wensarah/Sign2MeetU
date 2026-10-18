@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 
-// Scene scan: one photo from the back camera -> what kind of place this is and
-// the most prominent objects. Used by /api/sentence to resolve THAT / THERE.
+// Scene scan: one photo (back camera, or the front camera's background while
+// signing) -> what kind of place this is, the most prominent objects, and any
+// readable signs. Used by /api/sentence to resolve THAT / THERE and name places.
 // Privacy: the photo is only forwarded to Perceptron for this one request.
 // It is never written to disk or logged.
 
@@ -9,15 +10,17 @@ export const runtime = "nodejs";
 export const maxDuration = 30;
 
 const PERCEPTRON_BASE = "https://api.perceptron.inc/v1";
-const MAX_BYTES = 2 * 1024 * 1024; // the client sends ~640px JPEGs, far smaller than this
+const MAX_BYTES = 3 * 1024 * 1024; // the client sends 640-1024px JPEGs, far smaller than this
 const MAX_OBJECTS = 8;
+const MAX_TEXT = 5;
 
 const SYSTEM_PROMPT = `You describe a phone camera photo so another system can understand where a person is.
 The photo may be a selfie with a person in the foreground. Ignore that person and describe the surroundings behind or around them.
 
 Return:
 - place: a short, common name for the kind of place (for example "cafe", "campus library", "lecture hall", "dorm laundry room", "hallway"). Use a few words, lowercase.
-- objects: up to ${MAX_OBJECTS} of the most prominent physical objects someone might point at or talk about, most prominent first, as short lowercase nouns ("printer", "coffee cup", "vending machine"). No people, no body parts, no text transcriptions.
+- objects: up to ${MAX_OBJECTS} of the most prominent physical objects someone might point at, ask for, or talk about, most prominent first. Use 1-3 lowercase words, adding a color or type when it tells similar objects apart ("red water bottle", "coffee cup", "laptop", "vending machine", "first aid kit"). Prefer things a person could want, use, or ask about over walls, floors and ceilings. No people, no body parts.
+- text: up to ${MAX_TEXT} short pieces of readable text on signs, doors, labels or screens that name a place or thing ("Restroom", "Tutoring Center", "Exit", "Room 204"). Copy them exactly. Empty list if none are readable.
 
 Always describe what you actually see in the photo, even for outdoor scenes or slightly blurry photos.
 Answer ONLY with JSON matching the schema.`;
@@ -27,8 +30,9 @@ const RESPONSE_SCHEMA = {
   properties: {
     place: { type: "string" },
     objects: { type: "array", items: { type: "string" } },
+    text: { type: "array", items: { type: "string" } },
   },
-  required: ["place", "objects"],
+  required: ["place", "objects", "text"],
   additionalProperties: false,
 } as const;
 
@@ -68,7 +72,7 @@ export async function POST(req: Request) {
   }
 }
 
-async function callPerceptron(dataUrl: string): Promise<{ place: string; objects: string[] }> {
+async function callPerceptron(dataUrl: string): Promise<{ place: string; objects: string[]; text: string[] }> {
   const res = await fetch(`${PERCEPTRON_BASE}/chat/completions`, {
     method: "POST",
     headers: {
@@ -78,7 +82,7 @@ async function callPerceptron(dataUrl: string): Promise<{ place: string; objects
     body: JSON.stringify({
       model: process.env.PERCEPTRON_MODEL || "perceptron-mk1.5",
       temperature: 0,
-      max_completion_tokens: 200,
+      max_completion_tokens: 300,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         {
@@ -115,5 +119,12 @@ async function callPerceptron(dataUrl: string): Promise<{ place: string; objects
         .filter(Boolean)
         .slice(0, MAX_OBJECTS)
     : [];
-  return { place: place || "unknown", objects };
+  const text = Array.isArray(parsed.text)
+    ? parsed.text
+        .filter((t: unknown): t is string => typeof t === "string")
+        .map((t: string) => t.replace(/\s+/g, " ").trim().slice(0, 40))
+        .filter(Boolean)
+        .slice(0, MAX_TEXT)
+    : [];
+  return { place: place || "unknown", objects, text };
 }

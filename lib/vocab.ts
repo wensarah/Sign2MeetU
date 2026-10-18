@@ -19,7 +19,7 @@ export const VOCAB: Sign[] = [
   {
     key: "HERE",
     text: "Here",
-    hint: "Flat hands, and while keeping the palms towards the ceiling both hands move in a circle.",
+    hint: "Flat hands, and while keeping the palms upwards, both hands move in a circle.",
   },
   {
     key: "THAT",
