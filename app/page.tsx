@@ -136,6 +136,38 @@ const toJpeg = (canvas: HTMLCanvasElement, quality: number): Promise<Blob | null
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Small line icons (Lucide shapes), drawn inline so they inherit the text color.
+function Icon({ children, className = "h-6 w-6" }: { children: React.ReactNode; className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      {children}
+    </svg>
+  );
+}
+
+const CameraIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z" />
+    <circle cx="12" cy="13" r="3" />
+  </Icon>
+);
+
+const ReplayIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+    <path d="M3 3v5h5" />
+  </Icon>
+);
+
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -584,22 +616,6 @@ export default function Home() {
   };
 
   // --- Controls --------------------------------------------------------------
-  const toggleListening = () => {
-    unlockSpeech();
-    if (phase === "listening") {
-      for (const ev of segmenterRef.current.flush()) handlersRef.current(ev); // keep what was signed
-      segmenterRef.current.reset();
-      stopClip();
-      setRecording(false);
-      setProgress(0);
-      setPhase("ready"); // paused
-    } else if (phase === "ready") {
-      segmenterRef.current.reset();
-      setNotice("");
-      setPhase("listening");
-    }
-  };
-
   const finishNow = () => {
     unlockSpeech();
     for (const ev of segmenterRef.current.flush()) handlersRef.current(ev);
@@ -610,18 +626,6 @@ export default function Home() {
     if (!last) return;
     segmenterRef.current.forgetLastSign();
     setGlosses((g) => g.filter((x) => x.id !== last.id));
-  };
-
-  const clearAll = () => {
-    pendingRef.current = [];
-    autoSceneRef.current = null;
-    historyRef.current = [];
-    segmenterRef.current.reset();
-    for (const s of sentences) s.marks.forEach((u) => URL.revokeObjectURL(u));
-    setGlosses([]);
-    setSentences([]);
-    setNotice("");
-    setProgress(0);
   };
 
   // --- Scene scan (back camera, one photo) -------------------------------------
@@ -695,32 +699,31 @@ export default function Home() {
   const pill =
     phase === "scanning"
       ? "📷 Scanning surroundings…"
-      : !listening
-        ? "Paused"
-        : recording
-          ? `Recording 0:${String(elapsed).padStart(2, "0")} / 0:${maxSeconds}`
-          : handsVisible
-            ? "✋ Starting…"
-            : "Raise your hands to start";
+      : recording
+        ? `Recording 0:${String(elapsed).padStart(2, "0")} / 0:${maxSeconds}`
+        : handsVisible
+          ? "✋ Starting…"
+          : "Raise your hands to start";
 
+  // The whole app fits one screen: header and cards keep their size, the camera
+  // takes whatever height is left (never scrolls).
   return (
     <main
       onPointerDown={unlockSpeech}
-      className="mx-auto flex min-h-[100dvh] max-w-md flex-col px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))]"
+      className="mx-auto flex h-[100dvh] max-w-md flex-col overflow-hidden px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-[max(0.5rem,env(safe-area-inset-top))]"
     >
-      <header className="flex items-start justify-between gap-2 py-2">
+      <header className="flex shrink-0 items-start justify-between gap-2 py-1">
         <div className="min-w-0">
-          <h1 className="text-2xl font-bold tracking-tight">
-            Sign2<span className="text-[var(--accent)]">MeetU</span>
+          <h1>
+            {/* eslint-disable-next-line @next/next/no-img-element -- static hand-drawn SVG, no optimization needed */}
+            <img src="/brand/title.svg" alt="Sign2MeetU" className="h-[4.5rem] w-auto" />
           </h1>
-          <p className="text-sm font-medium leading-snug text-[var(--ink)]">
-            Sign and translate!
-          </p>
+          <p className="text-sm font-medium leading-snug text-[var(--ink)]">Sign and translate!</p>
         </div>
         <div className="flex gap-2">
           <button
             onClick={() => setSpeak((s) => !s)}
-            className="min-h-11 rounded-full bg-[var(--panel)] px-3 py-1.5 text-sm"
+            className="min-h-11 whitespace-nowrap rounded-full bg-[var(--panel)] px-3 py-1.5 text-sm"
             aria-pressed={speak}
           >
             {speak ? "🔊 Voice on" : "🔇 Voice off"}
@@ -739,7 +742,7 @@ export default function Home() {
       </header>
 
       <div
-        className={`grid transition-[grid-template-rows,opacity] duration-300 ease-in-out ${
+        className={`grid shrink-0 transition-[grid-template-rows,opacity] duration-300 ease-in-out ${
           showInfo ? "mb-2 grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"
         }`}
         inert={!showInfo}
@@ -748,7 +751,7 @@ export default function Home() {
         <div className="overflow-hidden">
           <aside
             id="help-info"
-            className="rounded-2xl border-2 border-[var(--accent)] bg-[var(--panel)] p-4 text-sm leading-relaxed text-[var(--ink)]"
+            className="max-h-[45dvh] overflow-y-auto rounded-2xl border-2 border-[var(--accent)] bg-[var(--panel)] p-4 text-sm leading-relaxed text-[var(--ink)]"
             aria-label="How to use Sign2MeetU"
           >
             <p>
@@ -758,7 +761,7 @@ export default function Home() {
             </p>
             <p className="mt-2">
               Recordings stop automatically after {maxSeconds} seconds. Anything shorter than{" "}
-              {RECORDING_MIN_MS / 1000} second is skipped. The round button pauses and resumes listening.
+              {RECORDING_MIN_MS / 1000} second is skipped.
             </p>
             <p className="mt-2">
               Scan surroundings takes one photo with the back camera so words like &ldquo;that&rdquo; can be named.
@@ -776,245 +779,211 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Camera */}
-      <div className="relative mt-2 aspect-[3/4] w-full">
-        <svg className="absolute h-0 w-0" aria-hidden="true" focusable="false">
-          <defs>
-            <clipPath id="camera-bubble-clip" clipPathUnits="objectBoundingBox">
-              <path d="M .08 0 H .92 Q 1 0 1 .08 V .86 Q 1 .94 .92 .94 H .88 L 1 1 L .76 .94 H .08 Q 0 .94 0 .86 V .08 Q 0 0 .08 0 Z" />
-            </clipPath>
-          </defs>
-        </svg>
-        <section
-          className="camera-bubble-frame absolute inset-0 bg-[var(--panel)]"
-          aria-label="Camera preview"
+      {/* Camera + cards, centered as one group: spare height splits evenly above and below.
+          The camera keeps the hand-drawn frame's exact proportions (public/brand/camera-frame.png,
+          745×940). It wants full screen width, but shrinks when the screen is too short. */}
+      <div className="flex min-h-0 flex-1 flex-col justify-center" style={{ containerType: "inline-size" }}>
+      <div
+        className="flex min-h-0 shrink items-center justify-center"
+        style={{ height: "calc(100cqw * 940 / 745)", containerType: "size" }}
+      >
+        <div
+          className="relative"
+          style={{ width: "min(100cqw, calc(100cqh * 745 / 940))", aspectRatio: "745 / 940" }}
         >
-          <video
-            ref={videoRef}
-            playsInline
-            muted
-            autoPlay
-            className={`h-full w-full object-cover ${mirrored ? "-scale-x-100" : ""}`}
-            aria-hidden="true"
-          />
-          <canvas
-            ref={canvasRef}
-            className={`pointer-events-none absolute inset-0 h-full w-full object-cover ${mirrored ? "-scale-x-100" : ""}`}
-            aria-hidden="true"
-          />
+          <section
+            className="absolute bottom-[5.2%] left-[5.1%] right-[5.9%] top-[4.7%] overflow-hidden rounded-2xl bg-[var(--panel)] shadow-none"
+            aria-label="Camera preview"
+          >
+            <video
+              ref={videoRef}
+              playsInline
+              muted
+              autoPlay
+              className={`h-full w-full object-cover ${mirrored ? "-scale-x-100" : ""}`}
+              aria-hidden="true"
+            />
+            <canvas
+              ref={canvasRef}
+              className={`pointer-events-none absolute inset-0 h-full w-full object-cover ${mirrored ? "-scale-x-100" : ""}`}
+              aria-hidden="true"
+            />
 
-          {phase !== "starting" && phase !== "error" && (
-            <div className="absolute left-3 top-3 flex items-center gap-2 rounded-full bg-black/60 px-3 py-1 text-sm text-white">
-              {recording && <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-[var(--rec)]" />}
-              {pill}
-            </div>
-          )}
-
-          {recording && <div className="absolute inset-0 rounded-3xl ring-4 ring-inset ring-[var(--rec)]" />}
-
-          {recording && progress > 0 && (
-            <div className="absolute inset-x-0 bottom-[7%] px-4">
-              <p className="mb-1 text-center text-sm font-medium text-white drop-shadow">Stopping…</p>
-              <div className="h-1.5 rounded bg-black/40">
-                <div className="h-full rounded bg-[var(--rec)]" style={{ width: `${progress * 100}%` }} />
+            {phase !== "starting" && phase !== "error" && (
+              <div className="absolute left-3 top-3 flex items-center gap-2 rounded-full bg-black/60 px-3 py-1 text-sm text-white">
+                {recording && <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-[var(--rec)]" />}
+                {pill}
               </div>
-            </div>
-          )}
+            )}
 
-          {phase === "scanning" && (
-            <div className="absolute inset-0 flex items-center justify-center bg-black/30 text-base text-white">
-              Hold still. Taking one photo…
-            </div>
-          )}
+            {recording && (
+              <>
+                <div className="pointer-events-none absolute inset-0 rounded-2xl ring-4 ring-inset ring-[var(--rec)]" />
+                <button
+                  onClick={finishNow}
+                  className="absolute right-3 top-3 z-10 min-h-11 rounded-full bg-[var(--ink)] px-4 text-sm font-semibold text-white"
+                >
+                  Done
+                </button>
+              </>
+            )}
 
-          {phase === "starting" && (
-            <div className="absolute inset-0 flex items-center justify-center bg-[var(--panel)]/95 text-[var(--muted)]">
-              Starting camera…
-            </div>
-          )}
+            {recording && progress > 0 && (
+              <div className="absolute inset-x-0 bottom-4 px-4">
+                <p className="mb-1 text-center text-sm font-medium text-white drop-shadow">Stopping…</p>
+                <div className="h-1.5 rounded bg-black/40">
+                  <div className="h-full rounded bg-[var(--rec)]" style={{ width: `${progress * 100}%` }} />
+                </div>
+              </div>
+            )}
 
-          {phase === "error" && (
-            <div className="absolute inset-0 flex items-center justify-center bg-[var(--panel)]/95 p-6 text-center text-[var(--muted)]">
-              {error}
-            </div>
-          )}
-        </section>
-        <svg
-          className="pointer-events-none absolute inset-0 z-20 h-full w-full"
-          viewBox="0 0 100 100"
-          preserveAspectRatio="none"
-          aria-hidden="true"
-          focusable="false"
-        >
-          <path
-            d="M 8 0 H 92 Q 100 0 100 8 V 86 Q 100 94 92 94 H 88 L 100 100 L 76 94 H 8 Q 0 94 0 86 V 8 Q 0 0 8 0 Z"
-            fill="none"
-            stroke="var(--accent)"
-            strokeWidth="2"
-            vectorEffect="non-scaling-stroke"
+            {phase === "scanning" && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/30 text-base text-white">
+                Hold still. Taking one photo…
+              </div>
+            )}
+
+            {phase === "starting" && (
+              <div className="absolute inset-0 flex items-center justify-center bg-[var(--panel)]/95 text-[var(--muted)]">
+                Starting camera…
+              </div>
+            )}
+
+            {phase === "error" && (
+              <div className="absolute inset-0 flex items-center justify-center bg-[var(--panel)]/95 p-6 text-center text-[var(--muted)]">
+                {error}
+              </div>
+            )}
+          </section>
+          {/* eslint-disable-next-line @next/next/no-img-element -- decorative overlay, must match the box exactly */}
+          <img
+            src="/brand/camera-frame.png"
+            alt=""
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 z-20 h-full w-full select-none"
           />
-        </svg>
+        </div>
       </div>
 
-      {/* Scene */}
-      <section className="mt-3 rounded-2xl bg-[var(--panel)] p-3 text-sm" aria-label="Surroundings">
-        <div className="flex items-center gap-2">
-          {scene ? (
-            <p className="min-w-0 flex-1 truncate font-medium">
-              📍 {scene.place}
-              {scene.objects.length > 0 && <span className="text-[var(--muted)]"> · {scene.objects.slice(0, 4).join(", ")}</span>}
-              {scene.text.length > 0 && <span className="text-[var(--muted)]"> · “{scene.text.slice(0, 2).join("”, “")}”</span>}
-            </p>
-          ) : (
-            <p className="min-w-0 flex-1 text-[var(--muted)]">No surroundings scanned</p>
-          )}
-          {scene && (
-            <button
-              onClick={() => setScene(null)}
-              className="min-h-11 min-w-11 rounded-full bg-[var(--bg)] px-3 text-sm"
-              aria-label="Clear surroundings"
-            >
-              ✕
-            </button>
-          )}
-          <button
-            onClick={scanScene}
-            disabled={!canScan}
-            className="min-h-11 shrink-0 rounded-full bg-[var(--ink)] px-3 text-sm text-white disabled:opacity-40"
-          >
-            {sceneLoading ? "Reading…" : scene ? "Rescan" : "Scan surroundings"}
-          </button>
+      {/* Surroundings card */}
+      <section
+        className="mt-1 flex shrink-0 items-center gap-3 rounded-3xl bg-[var(--panel)] p-3"
+        aria-label="Surroundings"
+      >
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--bg)]/60 text-[var(--ink)]">
+          <CameraIcon className="h-5 w-5" />
         </div>
-        <p className="mt-1 text-xs text-[var(--muted)]">
-          {sceneError ||
-            (recording ? "Finish signing to scan." : "Uses the back camera. Photo is used once and not saved.")}
-        </p>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-semibold leading-tight text-[var(--ink)]">
+            {scene ? `📍 ${scene.place}` : "No surroundings scanned"}
+          </p>
+          <p className="mt-0.5 truncate text-xs leading-snug text-[var(--muted)]">
+            {sceneError ||
+              (scene
+                ? [scene.objects.slice(0, 3).join(", "), scene.text.length ? `“${scene.text[0]}”` : ""]
+                    .filter(Boolean)
+                    .join(" · ") || "Nothing specific spotted"
+                : recording
+                  ? "Finish signing to scan."
+                  : "Uses the back camera. Photo is used once and not saved.")}
+          </p>
+        </div>
+        {scene && (
+          <button
+            onClick={() => setScene(null)}
+            className="min-h-11 min-w-11 shrink-0 rounded-full text-[var(--muted)]"
+            aria-label="Clear surroundings"
+          >
+            ✕
+          </button>
+        )}
+        <div className="h-10 w-px shrink-0 bg-[var(--muted)]/25" aria-hidden="true" />
+        <button
+          onClick={scanScene}
+          disabled={!canScan}
+          className="flex min-h-12 shrink-0 items-center gap-2 rounded-2xl bg-[var(--accent)] px-3 text-base text-white disabled:opacity-50"
+        >
+          <CameraIcon className="h-5 w-5" />
+          {sceneLoading ? "Reading…" : scene ? "Rescan" : "Scan"}
+        </button>
       </section>
 
-      {/* Result */}
+      {/* Translation card: signs in progress while signing, then the finished sentence */}
       <section
         id="result"
-        className="mt-3 mb-2 min-h-[5.5rem] rounded-2xl bg-[var(--ink)] p-4 text-white"
+        className="mt-2 flex min-h-[5.5rem] shrink-0 items-center gap-3 rounded-3xl bg-[var(--accent)] p-4 text-white"
         aria-label="Translation"
         aria-live="polite"
         aria-atomic="true"
       >
-        {translating > 0 ? (
-          <p className="text-white">Putting it into English…</p>
-        ) : notice ? (
-          <p className="text-white">{notice}</p>
-        ) : latest ? (
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-3xl font-bold leading-tight">{latest.text}</p>
-              <p className="mt-1 text-xs text-white/80">
-                Signed: {latest.glosses.join(" · ")}
-                {latest.scenePlace && ` · 📍 ${latest.scenePlace}`}
-              </p>
-              {latest.marks.length > 0 && (
-                <div className="mt-2 flex gap-2" aria-label="What Perceptron looked at for pointing signs">
-                  {latest.marks.map((url) => (
-                    // eslint-disable-next-line @next/next/no-img-element -- local blob URL, not an optimizable asset
-                    <img
-                      key={url}
-                      src={url}
-                      alt="Camera still with the pointing direction marked in green"
-                      className="h-16 -scale-x-100 rounded-lg object-cover"
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-            <button
-              onClick={() => say(latest.text)}
-              className="min-h-11 shrink-0 rounded-full bg-white/15 px-3 py-1.5 text-sm text-white"
-            >
-              Replay
-            </button>
-          </div>
-        ) : (
-          <p className="text-white">
-            {!listening
-              ? "Paused. Tap the round button to resume."
-              : recording
-                ? "Sign one word at a time. Lower your hands between signs."
-                : `Raise your hands to start signing. Keep them down for ${SENTENCE_GAP_MS / 1000} seconds when you're done.`}
-          </p>
-        )}
-      </section>
-
-      {/* Transcript: signs in progress, then earlier sentences */}
-      <section
-        className="mt-3 mb-5 flex min-h-0 flex-1 items-start gap-2 rounded-2xl bg-[#905fc1] p-4 text-white"
-        aria-label="Transcript"
-      >
-        <div className="min-w-0 flex-1 overflow-y-auto">
+        <div className="min-w-0 flex-1">
           {glosses.length > 0 ? (
             <ul className="flex flex-wrap gap-1.5" aria-label="Signs so far">
               {glosses.map((g) => (
                 <li
                   key={g.id}
-                  className={`rounded-full px-3 py-1 text-base ${
-                    g.status === "done" ? "bg-[var(--ink)]" : "bg-white/20"
-                  }`}
+                  className={`rounded-full px-3 py-0.5 text-lg ${g.status === "done" ? "bg-white/20" : "bg-white/10"}`}
                   title={g.via ? `Recognized by ${g.via}` : undefined}
                 >
                   {g.status === "pending" ? "…" : g.status === "skipped" ? "?" : g.text}
-                  {g.target && <span className="text-white/75"> · {g.target}</span>}
+                  {g.target && <span className="text-white/70"> · {g.target}</span>}
                 </li>
               ))}
             </ul>
+          ) : translating > 0 ? (
+            <p className="text-2xl leading-tight">Putting it into English…</p>
+          ) : notice ? (
+            <p className="text-base leading-snug">{notice}</p>
+          ) : latest ? (
+            <>
+              <p className="line-clamp-2 text-2xl font-bold leading-tight">{latest.text}</p>
+              <div className="mt-0.5 flex items-center gap-2">
+                <p className="min-w-0 truncate text-sm text-white/70">
+                  Signed: {latest.glosses.join(" · ")}
+                  {latest.scenePlace && ` · 📍 ${latest.scenePlace}`}
+                </p>
+                {latest.marks.map((url) => (
+                  // eslint-disable-next-line @next/next/no-img-element -- local blob URL, not an optimizable asset
+                  <img
+                    key={url}
+                    src={url}
+                    alt="Camera still with the pointing direction marked in green"
+                    className="h-8 shrink-0 -scale-x-100 rounded-md object-cover"
+                  />
+                ))}
+              </div>
+            </>
           ) : (
-            <p className="text-lg leading-snug text-white">
-              {sentences.length > 1 ? "Earlier:" : "Signs appear here as you make them."}
+            <p className="text-base leading-snug">
+              {recording
+                ? "Sign one word at a time. Lower your hands between signs."
+                : `Raise your hands to start. Keep them down for ${SENTENCE_GAP_MS / 1000} seconds when you're done.`}
             </p>
           )}
-          {sentences.length > 1 && (
-            <ol className="mt-2 space-y-1 text-base leading-snug text-white/90">
-              {sentences.slice(1).map((s) => (
-                <li key={s.id}>{s.text}</li>
-              ))}
-            </ol>
-          )}
         </div>
-        {(glosses.length > 0 || sentences.length > 0) && (
-          <div className="flex shrink-0 flex-col gap-2">
-            {glosses.length > 0 && (
-              <button onClick={undo} className="min-h-11 rounded-full bg-[var(--ink)] px-3 py-1.5 text-sm text-white">
-                Undo
-              </button>
-            )}
-            <button onClick={clearAll} className="min-h-11 rounded-full bg-[var(--ink)] px-3 py-1.5 text-sm text-white">
-              Clear
+        {glosses.length > 0 ? (
+          <button
+            onClick={undo}
+            className="flex min-h-12 shrink-0 items-center gap-2 rounded-2xl bg-white/15 px-3 text-base text-white"
+          >
+            <ReplayIcon className="h-5 w-5" />
+            Undo
+          </button>
+        ) : (
+          latest &&
+          translating === 0 && (
+            <button
+              onClick={() => say(latest.text)}
+              className="flex min-h-12 shrink-0 items-center gap-2 rounded-2xl bg-white/15 px-3 text-base text-white"
+            >
+              <ReplayIcon className="h-5 w-5" />
+              Replay
             </button>
-          </div>
+          )
         )}
       </section>
-
-      {/* Controls */}
-      <div className="relative flex items-center justify-center pt-3">
-        <button
-          onClick={toggleListening}
-          disabled={phase !== "ready" && phase !== "listening"}
-          aria-label={listening ? "Pause listening" : "Resume listening"}
-          aria-pressed={!listening}
-          className="flex h-20 w-20 items-center justify-center rounded-full border-4 border-[var(--ink)] transition active:scale-95 disabled:opacity-40"
-        >
-          <span
-            className={`block bg-[var(--rec)] transition-all ${
-              listening ? "h-7 w-7 rounded-md" : "h-14 w-14 rounded-full"
-            }`}
-          />
-        </button>
-        {recording && (
-          <button
-            onClick={finishNow}
-            className="absolute right-0 min-h-11 rounded-full bg-[var(--ink)] px-4 py-2 text-sm font-semibold text-white"
-          >
-            Done
-          </button>
-        )}
       </div>
+
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {statusMessage}
       </p>
